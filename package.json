@@ -1,0 +1,25 @@
+{
+  "name": "hackerone-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for accessing HackerOne reports in Claude Code",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "hackerone-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "node-fetch": "^3.3.2",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}

@@ -1,6 +1,8 @@
 # HackerOne MCP Server
 
-MCP server that gives Claude Code (or any MCP client) live access to your HackerOne reports, programs, earnings, and scope data via the official HackerOne API.
+> **Disclaimer:** This is an unofficial, community-built project. It is not affiliated with, endorsed by, or maintained by HackerOne. "HackerOne" is a trademark of HackerOne, Inc. This project simply integrates with their publicly documented [Hacker API](https://api.hackerone.com/hacker-resources/).
+
+MCP server that gives Claude Code (or any MCP client) live access to your HackerOne reports, programs, earnings, and scope data via the HackerOne API.
 
 ## Setup
 
@@ -11,7 +13,7 @@ Go to **HackerOne > Settings > API Token** and generate one.
 ### 2. Install and build
 
 ```bash
-git clone https://github.com/sicksec/hackerone-mcp-server.git
+git clone https://github.com/Sicks3c/hackerone-mcp-server.git
 cd hackerone-mcp-server
 npm install
 npm run build

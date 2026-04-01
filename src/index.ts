@@ -9,14 +9,21 @@ import {
   getReportActivities,
   getReportSummary,
   listPrograms,
+  getProgramDetails,
   getProgramScope,
   getProgramWeaknesses,
   getEarnings,
+  getHackerProfile,
+  getBalance,
+  submitReport,
+  addComment,
+  closeReport,
+  searchDisclosedReports,
 } from "./h1client.js";
 
 const server = new McpServer({
   name: "hackerone",
-  version: "1.0.0",
+  version: "2.0.0",
 });
 
 // ── Tool: search_reports ───────────────────────────────────────────
@@ -88,7 +95,7 @@ server.tool(
 // ── Tool: get_report ───────────────────────────────────────────────
 server.tool(
   "get_report",
-  "Get the full details of a specific HackerOne report by ID. Returns title, vulnerability details, impact, severity, CVSS, timestamps, and program info.",
+  "Get the full details of a specific HackerOne report by ID. Returns title, vulnerability details, impact, severity, full CVSS vector/score, bounty amounts, attachments, timestamps, and program info.",
   {
     report_id: z.string().describe("The HackerOne report ID"),
   },
@@ -175,14 +182,14 @@ server.tool(
 // ── Tool: list_programs ────────────────────────────────────────────
 server.tool(
   "list_programs",
-  "List bug bounty programs you have access to on HackerOne.",
+  "List bug bounty programs you have access to on HackerOne. Auto-paginates to return all programs.",
   {
     page_size: z
       .number()
       .min(1)
-      .max(100)
+      .max(1000)
       .optional()
-      .describe("Number of programs to return (default 50)"),
+      .describe("Max programs to return (default: all)"),
   },
   async ({ page_size }) => {
     try {
@@ -192,6 +199,35 @@ server.tool(
           {
             type: "text" as const,
             text: JSON.stringify(programs, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: get_program_details ──────────────────────────────────────
+server.tool(
+  "get_program_details",
+  "Get detailed info about a single program: policy, response times, metrics, bounty splitting, and submission state.",
+  {
+    program_handle: z
+      .string()
+      .describe("Program handle (e.g. 'uber', 'github')"),
+  },
+  async ({ program_handle }) => {
+    try {
+      const details = await getProgramDetails(program_handle);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(details, null, 2),
           },
         ],
       };
@@ -273,7 +309,7 @@ server.tool(
 // ── Tool: get_program_scope ──────────────────────────────────────
 server.tool(
   "get_program_scope",
-  "Get the in-scope assets for a bug bounty program. Returns asset types, identifiers, bounty eligibility, and severity caps. Useful when drafting reports to pick the correct asset.",
+  "Get the in-scope assets for a bug bounty program. Auto-paginates to return all scope items. Returns asset types, identifiers, bounty eligibility, and severity caps.",
   {
     program_handle: z
       .string()
@@ -281,9 +317,9 @@ server.tool(
     page_size: z
       .number()
       .min(1)
-      .max(100)
+      .max(1000)
       .optional()
-      .describe("Number of scope items to return (default 100)"),
+      .describe("Max scope items to return (default: all)"),
   },
   async ({ program_handle, page_size }) => {
     try {
@@ -308,7 +344,7 @@ server.tool(
 // ── Tool: get_program_weaknesses ────────────────────────────────
 server.tool(
   "get_program_weaknesses",
-  "Get the accepted vulnerability/weakness types for a program. Helps frame reports using the right CWE categories the program cares about.",
+  "Get the accepted vulnerability/weakness types for a program. Auto-paginates. Helps frame reports using the right CWE categories the program cares about.",
   {
     program_handle: z
       .string()
@@ -316,9 +352,9 @@ server.tool(
     page_size: z
       .number()
       .min(1)
-      .max(100)
+      .max(1000)
       .optional()
-      .describe("Number of weaknesses to return (default 100)"),
+      .describe("Max weaknesses to return (default: all)"),
   },
   async ({ program_handle, page_size }) => {
     try {
@@ -360,6 +396,214 @@ server.tool(
           {
             type: "text" as const,
             text: JSON.stringify(earnings, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: get_hacker_profile ──────────────────────────────────────
+server.tool(
+  "get_hacker_profile",
+  "Get your HackerOne hacker profile: reputation, signal, impact, rank, and account info.",
+  {},
+  async () => {
+    try {
+      const profile = await getHackerProfile();
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(profile, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: get_balance ─────────────────────────────────────────────
+server.tool(
+  "get_balance",
+  "Get your current unpaid bounty balance on HackerOne.",
+  {},
+  async () => {
+    try {
+      const balance = await getBalance();
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(balance, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: submit_report ───────────────────────────────────────────
+server.tool(
+  "submit_report",
+  "Submit a new vulnerability report to a HackerOne program. Returns the new report ID and URL. Use get_program_scope and get_program_weaknesses first to get the right scope/weakness IDs.",
+  {
+    program_handle: z
+      .string()
+      .describe("Program handle to submit to (e.g. 'uber')"),
+    title: z.string().describe("Report title"),
+    vulnerability_information: z
+      .string()
+      .describe(
+        "Full vulnerability details in markdown — steps to reproduce, root cause, and proof of concept"
+      ),
+    impact: z
+      .string()
+      .optional()
+      .describe("Impact statement — what an attacker can achieve"),
+    severity_rating: z
+      .enum(["none", "low", "medium", "high", "critical"])
+      .optional()
+      .describe("Suggested severity rating"),
+    weakness_id: z
+      .string()
+      .optional()
+      .describe(
+        "Weakness/CWE ID from get_program_weaknesses (the numeric id field)"
+      ),
+    structured_scope_id: z
+      .string()
+      .optional()
+      .describe(
+        "Scope asset ID from get_program_scope (the numeric id field)"
+      ),
+  },
+  async (params) => {
+    try {
+      const result = await submitReport(params);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: add_comment ─────────────────────────────────────────────
+server.tool(
+  "add_comment",
+  "Add a comment to an existing HackerOne report. Use this to respond to triage questions or provide additional information.",
+  {
+    report_id: z.string().describe("The HackerOne report ID"),
+    message: z.string().describe("Comment text (supports markdown)"),
+    internal: z
+      .boolean()
+      .optional()
+      .describe("If true, comment is only visible to the team (default false)"),
+  },
+  async ({ report_id, message, internal }) => {
+    try {
+      const result = await addComment(report_id, message, internal ?? false);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: close_report ────────────────────────────────────────────
+server.tool(
+  "close_report",
+  "Withdraw/close one of your own HackerOne reports. Sends a close request with an optional message.",
+  {
+    report_id: z.string().describe("The HackerOne report ID to close"),
+    message: z
+      .string()
+      .optional()
+      .describe("Reason for closing (default: 'Withdrawing this report.')"),
+  },
+  async ({ report_id, message }) => {
+    try {
+      const result = await closeReport(report_id, message);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: search_disclosed_reports ────────────────────────────────
+server.tool(
+  "search_disclosed_reports",
+  "Search publicly disclosed HackerOne reports (hacktivity). Useful for learning what gets paid, finding prior art, and understanding what a program considers valid.",
+  {
+    program: z
+      .string()
+      .optional()
+      .describe("Program handle to filter by (e.g. 'uber')"),
+    query: z
+      .string()
+      .optional()
+      .describe("Keyword to filter results (e.g. 'SSRF', 'IDOR')"),
+    page_size: z
+      .number()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe("Number of results (default 25)"),
+  },
+  async (params) => {
+    try {
+      const results = await searchDisclosedReports(params);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(results, null, 2),
           },
         ],
       };

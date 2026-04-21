@@ -443,7 +443,8 @@ export async function listPrograms(pageSize = 50) {
 // ── Get program details ───────────────────────────────────────────
 export async function getProgramDetails(handle: string) {
   const data = await h1Fetch(`/hackers/programs/${handle}`);
-  const p = data.data;
+  // Some H1 endpoints return the resource directly; others wrap it in {data: {...}}
+  const p = data.data ?? data;
   const attrs = p.attributes;
 
   return {
@@ -595,6 +596,7 @@ export async function submitReport(opts: {
   severity_rating?: string;
   weakness_id?: string;
   structured_scope_id?: string;
+  draft?: boolean;
 }) {
   const relationships: any = {
     program: {
@@ -631,6 +633,7 @@ export async function submitReport(opts: {
         vulnerability_information: opts.vulnerability_information,
         impact: opts.impact ?? "",
         severity_rating: opts.severity_rating,
+        ...(opts.draft ? { state: "pending" } : {}),
       },
       relationships,
     },
@@ -743,4 +746,118 @@ export async function searchDisclosedReports(opts: {
   }
 
   return reports;
+}
+
+// ── Report Intents (draft reports) ───────────────────────────────────
+
+function normalizeIntent(d: any) {
+  const a = d.attributes ?? {};
+  return {
+    id: d.id,
+    type: d.type,
+    title: a.title ?? null,
+    description: a.description ?? null,
+    state: a.state ?? null,
+    has_failing_jobs: a.has_failing_jobs ?? false,
+    has_canceled_jobs: a.has_canceled_jobs ?? false,
+    job_status_by_type: a.job_status_by_type ?? {},
+    metadata: a.metadata ?? {},
+    report_id: d.relationships?.report?.data?.id ?? null,
+    url: `https://hackerone.com/report_intents/${d.id}`,
+  };
+}
+
+export async function createReportIntent(opts: {
+  program_handle: string;
+  description: string;
+  title?: string;
+}) {
+  const body = {
+    data: {
+      type: "report-intent",
+      attributes: {
+        team_handle: opts.program_handle,
+        description: opts.description,
+        ...(opts.title ? { title: opts.title } : {}),
+      },
+    },
+  };
+  const result = await h1Post("/hackers/report_intents", body);
+  return normalizeIntent(result.data);
+}
+
+export async function listReportIntents() {
+  const result = await h1Fetch("/hackers/report_intents", undefined, {
+    skipCache: true,
+  });
+  const items: any[] = result.data ?? [];
+  return items.map(normalizeIntent);
+}
+
+export async function getReportIntent(id: string) {
+  const result = await h1Fetch(`/hackers/report_intents/${id}`, undefined, {
+    skipCache: true,
+  });
+  return normalizeIntent(result.data);
+}
+
+export async function updateReportIntent(
+  id: string,
+  opts: { title?: string; description?: string }
+) {
+  const url = `${H1_BASE}/hackers/report_intents/${id}`;
+  const body = {
+    data: {
+      type: "report-intent",
+      id,
+      attributes: {
+        ...(opts.title !== undefined ? { title: opts.title } : {}),
+        ...(opts.description !== undefined
+          ? { description: opts.description }
+          : {}),
+      },
+    },
+  };
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Basic ${getAuth()}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HackerOne API error ${res.status}: ${text}`);
+  }
+  const json = await res.json() as any;
+  return normalizeIntent(json.data);
+}
+
+export async function deleteReportIntent(id: string) {
+  const url = `${H1_BASE}/hackers/report_intents/${id}`;
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Basic ${getAuth()}`,
+      Accept: "application/json",
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HackerOne API error ${res.status}: ${text}`);
+  }
+  return { deleted: true, id };
+}
+
+export async function submitReportIntent(id: string) {
+  const result = await h1Post(`/hackers/report_intents/${id}/submit`, {});
+  // Returns the newly created report
+  const r = result.data;
+  return {
+    report_id: r?.id ?? null,
+    state: r?.attributes?.state ?? null,
+    url: r?.id ? `https://hackerone.com/reports/${r.id}` : null,
+  };
 }

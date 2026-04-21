@@ -19,6 +19,12 @@ import {
   addComment,
   closeReport,
   searchDisclosedReports,
+  createReportIntent,
+  listReportIntents,
+  getReportIntent,
+  updateReportIntent,
+  deleteReportIntent,
+  submitReportIntent,
 } from "./h1client.js";
 
 const server = new McpServer({
@@ -492,6 +498,12 @@ server.tool(
       .describe(
         "Scope asset ID from get_program_scope (the numeric id field)"
       ),
+    draft: z
+      .boolean()
+      .optional()
+      .describe(
+        "Intended to save as draft (state: pending) — NOTE: H1 API currently ignores this and submits directly. Use web UI for true draft behavior."
+      ),
   },
   async (params) => {
     try {
@@ -612,6 +624,114 @@ server.tool(
         content: [{ type: "text" as const, text: `Error: ${err.message}` }],
         isError: true,
       };
+    }
+  }
+);
+
+// ── Tool: create_report_intent ─────────────────────────────────────
+server.tool(
+  "create_report_intent",
+  "Create a draft report (report intent) on HackerOne. Report intents are saved as pending drafts that can be edited and submitted later. Use this instead of submit_report when you want to draft before submitting.",
+  {
+    program_handle: z.string().describe("Program handle (e.g. 'deptofdefense')"),
+    description: z
+      .string()
+      .describe(
+        "Full vulnerability details in markdown — summary, steps to reproduce, impact, evidence"
+      ),
+    title: z.string().optional().describe("Report title (optional, can be set later)"),
+  },
+  async (params) => {
+    try {
+      const result = await createReportIntent(params);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ── Tool: list_report_intents ──────────────────────────────────────
+server.tool(
+  "list_report_intents",
+  "List all your HackerOne report intents (drafts), including their state (pending, ready_to_submit, submitted).",
+  {},
+  async () => {
+    try {
+      const result = await listReportIntents();
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ── Tool: get_report_intent ────────────────────────────────────────
+server.tool(
+  "get_report_intent",
+  "Get details of a specific HackerOne report intent (draft) by ID.",
+  {
+    id: z.string().describe("Report intent ID"),
+  },
+  async ({ id }) => {
+    try {
+      const result = await getReportIntent(id);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ── Tool: update_report_intent ─────────────────────────────────────
+server.tool(
+  "update_report_intent",
+  "Update the title or description of a HackerOne report intent (draft).",
+  {
+    id: z.string().describe("Report intent ID"),
+    title: z.string().optional().describe("Updated title"),
+    description: z.string().optional().describe("Updated vulnerability description in markdown"),
+  },
+  async ({ id, title, description }) => {
+    try {
+      const result = await updateReportIntent(id, { title, description });
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ── Tool: delete_report_intent ─────────────────────────────────────
+server.tool(
+  "delete_report_intent",
+  "Delete a HackerOne report intent (draft) by ID.",
+  {
+    id: z.string().describe("Report intent ID to delete"),
+  },
+  async ({ id }) => {
+    try {
+      const result = await deleteReportIntent(id);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ── Tool: submit_report_intent ─────────────────────────────────────
+server.tool(
+  "submit_report_intent",
+  "Submit a HackerOne report intent (draft), converting it into a full submitted report. Only call this after explicit user approval.",
+  {
+    id: z.string().describe("Report intent ID to submit"),
+  },
+  async ({ id }) => {
+    try {
+      const result = await submitReportIntent(id);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
     }
   }
 );

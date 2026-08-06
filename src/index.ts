@@ -21,6 +21,9 @@ import {
   searchDisclosedReports,
 } from "./h1client.js";
 
+const REPORT_ID = z.string().regex(/^\d+$/);
+const PROGRAM_HANDLE = z.string().regex(/^[a-z0-9_-]+$/);
+
 const server = new McpServer({
   name: "hackerone",
   version: "2.0.0",
@@ -97,7 +100,7 @@ server.tool(
   "get_report",
   "Get the full details of a specific HackerOne report by ID. Returns title, vulnerability details, impact, severity, full CVSS vector/score, bounty amounts, attachments, timestamps, and program info.",
   {
-    report_id: z.string().describe("The HackerOne report ID"),
+    report_id: REPORT_ID.describe("The HackerOne report ID"),
   },
   async ({ report_id }) => {
     try {
@@ -124,7 +127,7 @@ server.tool(
   "get_report_with_conversation",
   "Get a report with its full triage conversation. Useful for understanding what questions triage asked, how you responded, and what led to resolution. Great for learning what works.",
   {
-    report_id: z.string().describe("The HackerOne report ID"),
+    report_id: REPORT_ID.describe("The HackerOne report ID"),
   },
   async ({ report_id }) => {
     try {
@@ -151,7 +154,7 @@ server.tool(
   "get_report_activities",
   "Get the activity timeline of a report: comments, state changes, bounty awards, and triage responses.",
   {
-    report_id: z.string().describe("The HackerOne report ID"),
+    report_id: REPORT_ID.describe("The HackerOne report ID"),
     page_size: z
       .number()
       .min(1)
@@ -216,9 +219,7 @@ server.tool(
   "get_program_details",
   "Get detailed info about a single program: policy, response times, metrics, bounty splitting, and submission state.",
   {
-    program_handle: z
-      .string()
-      .describe("Program handle (e.g. 'uber', 'github')"),
+    program_handle: PROGRAM_HANDLE.describe("Program handle (e.g. 'uber', 'github')"),
   },
   async ({ program_handle }) => {
     try {
@@ -311,9 +312,7 @@ server.tool(
   "get_program_scope",
   "Get the in-scope assets for a bug bounty program. Auto-paginates to return all scope items. Returns asset types, identifiers, bounty eligibility, and severity caps.",
   {
-    program_handle: z
-      .string()
-      .describe("Program handle (e.g. 'uber', 'ipc-h1c-aws-tokyo-2026')"),
+    program_handle: PROGRAM_HANDLE.describe("Program handle (e.g. 'uber', 'ipc-h1c-aws-tokyo-2026')"),
     page_size: z
       .number()
       .min(1)
@@ -346,9 +345,7 @@ server.tool(
   "get_program_weaknesses",
   "Get the accepted vulnerability/weakness types for a program. Auto-paginates. Helps frame reports using the right CWE categories the program cares about.",
   {
-    program_handle: z
-      .string()
-      .describe("Program handle (e.g. 'uber', 'ipc-h1c-aws-tokyo-2026')"),
+    program_handle: PROGRAM_HANDLE.describe("Program handle (e.g. 'uber', 'ipc-h1c-aws-tokyo-2026')"),
     page_size: z
       .number()
       .min(1)
@@ -463,9 +460,7 @@ server.tool(
   "submit_report",
   "Submit a new vulnerability report to a HackerOne program. Returns the new report ID and URL. Use get_program_scope and get_program_weaknesses first to get the right scope/weakness IDs.",
   {
-    program_handle: z
-      .string()
-      .describe("Program handle to submit to (e.g. 'uber')"),
+    program_handle: PROGRAM_HANDLE.describe("Program handle to submit to (e.g. 'uber')"),
     title: z.string().describe("Report title"),
     vulnerability_information: z
       .string()
@@ -518,7 +513,7 @@ server.tool(
   "add_comment",
   "Add a comment to an existing HackerOne report. Use this to respond to triage questions or provide additional information.",
   {
-    report_id: z.string().describe("The HackerOne report ID"),
+    report_id: REPORT_ID.describe("The HackerOne report ID"),
     message: z.string().describe("Comment text (supports markdown)"),
     internal: z
       .boolean()
@@ -550,7 +545,7 @@ server.tool(
   "close_report",
   "Withdraw/close one of your own HackerOne reports. Sends a close request with an optional message.",
   {
-    report_id: z.string().describe("The HackerOne report ID to close"),
+    report_id: REPORT_ID.describe("The HackerOne report ID to close"),
     message: z
       .string()
       .optional()

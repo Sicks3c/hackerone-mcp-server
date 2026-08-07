@@ -1,5 +1,6 @@
 import fetch, { type RequestInit } from "node-fetch";
 import { type Readable } from "stream";
+import { execFileSync } from "child_process";
 
 const H1_BASE = "https://api.hackerone.com/v1";
 
@@ -32,16 +33,29 @@ function cacheInvalidatePrefix(prefix: string): void {
 }
 
 // ── Auth ──────────────────────────────────────────────────────────
-function getAuth(): string {
-  const username = process.env.H1_USERNAME;
-  const token = process.env.H1_API_TOKEN;
+function opRead(ref: string): string {
+  return execFileSync("op", ["read", ref], { timeout: 5000 }).toString().trim();
+}
+
+function resolveCredential(envVar: string, opEnvVar: string): string | undefined {
+  const opRef = process.env[opEnvVar];
+  if (opRef) return opRead(opRef);
+  return process.env[envVar];
+}
+
+function buildAuth(): string {
+  const username = resolveCredential("H1_USERNAME", "H1_USERNAME_OP");
+  const token = resolveCredential("H1_API_TOKEN", "H1_API_TOKEN_OP");
   if (!username || !token) {
     throw new Error(
-      "Missing H1_USERNAME or H1_API_TOKEN environment variables"
+      "Missing credentials: set H1_USERNAME and H1_API_TOKEN, " +
+      "or H1_USERNAME_OP and H1_API_TOKEN_OP with 1Password secret references"
     );
   }
   return Buffer.from(`${username}:${token}`).toString("base64");
 }
+
+const AUTH = buildAuth();
 
 // ── HTTP helpers with retry + backoff ─────────────────────────────
 async function h1Fetch(
@@ -70,7 +84,7 @@ async function h1Fetch(
     try {
       const res = await fetch(url.toString(), {
         headers: {
-          Authorization: `Basic ${getAuth()}`,
+          Authorization: `Basic ${AUTH}`,
           Accept: "application/json",
         },
       });
@@ -112,7 +126,7 @@ async function h1Post(
       const res = await fetch(url, {
         method: "POST",
         headers: {
-          Authorization: `Basic ${getAuth()}`,
+          Authorization: `Basic ${AUTH}`,
           Accept: "application/json",
           "Content-Type": contentType,
         },

@@ -98,7 +98,41 @@ async function h1Fetch(
   throw lastErr ?? new Error("h1Fetch failed after retries");
 }
 
+// ── Write guard ───────────────────────────────────────────────────
+// The server is read-only by default. Set H1_ALLOW_WRITES=true to enable
+// submit_report, add_comment, and close_report.
+export const WRITES_ENABLED = process.env.H1_ALLOW_WRITES === "true";
+
+// Set H1_ALLOW_DRAFTS=true to enable HAI report drafts (report intents).
+// Drafts are private to the hacker and are never submitted to the program.
+export const DRAFTS_ENABLED = process.env.H1_ALLOW_DRAFTS === "true";
+
+function assertWritesEnabled(): void {
+  if (!WRITES_ENABLED) {
+    throw new Error(
+      "Write operations are disabled (read-only mode). Set H1_ALLOW_WRITES=true in the server environment to enable them."
+    );
+  }
+}
+
+function assertDraftsEnabled(): void {
+  if (!DRAFTS_ENABLED) {
+    throw new Error(
+      "HAI report drafts are disabled. Set H1_ALLOW_DRAFTS=true in the server environment to enable them."
+    );
+  }
+}
+
 async function h1Post(
+  path: string,
+  body: any,
+  contentType = "application/json"
+): Promise<any> {
+  assertWritesEnabled();
+  return h1PostRaw(path, body, contentType);
+}
+
+async function h1PostRaw(
   path: string,
   body: any,
   contentType = "application/json"
@@ -697,6 +731,54 @@ export async function closeReport(reportId: string, message?: string) {
     message: result.data?.attributes?.message,
     created_at: result.data?.attributes?.created_at,
   };
+}
+
+// ── HAI report drafts (report intents) ────────────────────────────
+// Report intents are drafts processed by HAI (Report Assistant). They are
+// private to the hacker and never submitted to the program via these calls.
+function mapReportIntent(r: any) {
+  const a = r.attributes ?? {};
+  return {
+    id: r.id,
+    title: a.title,
+    state: a.state,
+    description: a.description,
+    has_failing_jobs: a.has_failing_jobs,
+    has_canceled_jobs: a.has_canceled_jobs,
+    job_status_by_type: a.job_status_by_type,
+    metadata: a.metadata,
+  };
+}
+
+export async function createReportIntent(
+  teamHandle: string,
+  description: string
+) {
+  assertDraftsEnabled();
+  const body = {
+    data: {
+      type: "report-intent",
+      attributes: {
+        team_handle: teamHandle,
+        description,
+      },
+    },
+  };
+
+  const result = await h1PostRaw("/hackers/report_intents", body);
+  return mapReportIntent(result.data);
+}
+
+export async function getReportIntent(id: string) {
+  const data = await h1Fetch(`/hackers/report_intents/${id}`, undefined, {
+    skipCache: true, // used for polling HAI job progress
+  });
+  return mapReportIntent(data.data);
+}
+
+export async function listReportIntents() {
+  const allData = await h1FetchAllPages("/hackers/report_intents");
+  return allData.map(mapReportIntent);
 }
 
 // ── Search disclosed reports ──────────────────────────────────────

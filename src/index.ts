@@ -18,7 +18,12 @@ import {
   submitReport,
   addComment,
   closeReport,
+  createReportIntent,
+  getReportIntent,
+  listReportIntents,
   searchDisclosedReports,
+  WRITES_ENABLED,
+  DRAFTS_ENABLED,
 } from "./h1client.js";
 
 const server = new McpServer({
@@ -458,6 +463,8 @@ server.tool(
   }
 );
 
+// ── Write tools (only registered when H1_ALLOW_WRITES=true) ───────
+if (WRITES_ENABLED) {
 // ── Tool: submit_report ───────────────────────────────────────────
 server.tool(
   "submit_report",
@@ -576,6 +583,99 @@ server.tool(
   }
 );
 
+// ── End of write tools ────────────────────────────────────────────
+}
+
+// ── HAI draft tools (only registered when H1_ALLOW_DRAFTS=true) ───
+if (DRAFTS_ENABLED) {
+// ── Tool: create_report_draft ─────────────────────────────────────
+server.tool(
+  "create_report_draft",
+  "Create a draft report (report intent) reviewed by HAI, HackerOne's Report Assistant. Nothing is submitted to the program — the draft stays private to you. HAI analyzes the description and produces an improved title and write-up. Poll with get_report_draft until state is 'ready_to_submit'. Requires the program to have Report Assistant enabled.",
+  {
+    program_handle: z
+      .string()
+      .describe("Program handle for the draft (e.g. 'uber')"),
+    description: z
+      .string()
+      .describe(
+        "Everything you know about the vulnerability: summary, steps to reproduce, impact, PoC details. The more detail, the better HAI's draft."
+      ),
+  },
+  async ({ program_handle, description }) => {
+    try {
+      const result = await createReportIntent(program_handle, description);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: get_report_draft ────────────────────────────────────────
+server.tool(
+  "get_report_draft",
+  "Get a HAI report draft (report intent) by ID. Use this to poll after create_report_draft: check job_status_by_type until HAI's jobs finish and state becomes 'ready_to_submit'.",
+  {
+    draft_id: z.string().describe("The report intent (draft) ID"),
+  },
+  async ({ draft_id }) => {
+    try {
+      const result = await getReportIntent(draft_id);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: list_report_drafts ──────────────────────────────────────
+server.tool(
+  "list_report_drafts",
+  "List your HAI report drafts (report intents) with their state and HAI job statuses.",
+  {},
+  async () => {
+    try {
+      const results = await listReportIntents();
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(results, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+// ── End of HAI draft tools ────────────────────────────────────────
+}
+
 // ── Tool: search_disclosed_reports ────────────────────────────────
 server.tool(
   "search_disclosed_reports",
@@ -620,7 +720,11 @@ server.tool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("HackerOne MCP server running on stdio");
+  const mode = [
+    WRITES_ENABLED ? "writes ENABLED" : "read-only",
+    ...(DRAFTS_ENABLED ? ["HAI drafts ENABLED"] : []),
+  ].join(", ");
+  console.error(`HackerOne MCP server running on stdio (${mode})`);
 }
 
 main().catch((err) => {

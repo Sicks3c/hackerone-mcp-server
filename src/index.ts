@@ -21,6 +21,9 @@ import {
   createReportIntent,
   getReportIntent,
   listReportIntents,
+  uploadReportIntentAttachments,
+  getReportIntentAttachments,
+  deleteReportIntentAttachment,
   searchDisclosedReports,
   WRITES_ENABLED,
   DRAFTS_ENABLED,
@@ -591,7 +594,7 @@ if (DRAFTS_ENABLED) {
 // ── Tool: create_report_draft ─────────────────────────────────────
 server.tool(
   "create_report_draft",
-  "Create a draft report (report intent) reviewed by HAI, HackerOne's Report Assistant. Nothing is submitted to the program — the draft stays private to you. HAI analyzes the description and produces an improved title and write-up. Poll with get_report_draft until state is 'ready_to_submit'. Requires the program to have Report Assistant enabled.",
+  "Create a draft report (report intent) reviewed by HAI, HackerOne's Report Assistant. Nothing is submitted to the program — the draft stays private to you. HAI analyzes the description and produces an improved title and write-up. Poll with get_report_draft until state is 'ready_to_submit'. Requires the program to have Report Assistant enabled. Attachments can be added with upload_draft_attachments; reference them in the description with {F<id>} (link) or !{F<id>} (embedded image).",
   {
     program_handle: z
       .string()
@@ -662,6 +665,95 @@ server.tool(
           {
             type: "text" as const,
             text: JSON.stringify(results, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: upload_draft_attachments ────────────────────────────────
+server.tool(
+  "upload_draft_attachments",
+  "Upload one or more files (screenshots, logs, PoC files) to a HAI report draft. The draft must not be submitted yet. Each returned attachment includes a markdown_reference ({F<id>}) to link it in text and a markdown_embed (!{F<id>}) to embed an image inline. Reference uploaded attachments in the draft description or in the eventual report body.",
+  {
+    draft_id: z.string().describe("The report intent (draft) ID"),
+    file_paths: z
+      .array(z.string())
+      .min(1)
+      .describe("Absolute paths of local files to upload (images, logs, etc.)"),
+  },
+  async ({ draft_id, file_paths }) => {
+    try {
+      const result = await uploadReportIntentAttachments(draft_id, file_paths);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: list_draft_attachments ──────────────────────────────────
+server.tool(
+  "list_draft_attachments",
+  "List all attachments on a HAI report draft, with their markdown reference ({F<id>}) and embed (!{F<id>}) syntax.",
+  {
+    draft_id: z.string().describe("The report intent (draft) ID"),
+  },
+  async ({ draft_id }) => {
+    try {
+      const result = await getReportIntentAttachments(draft_id);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: delete_draft_attachment ─────────────────────────────────
+server.tool(
+  "delete_draft_attachment",
+  "Delete an attachment from a HAI report draft. Irreversible; only possible while the draft has not been submitted.",
+  {
+    draft_id: z.string().describe("The report intent (draft) ID"),
+    attachment_id: z.string().describe("The attachment ID to delete"),
+  },
+  async ({ draft_id, attachment_id }) => {
+    try {
+      const result = await deleteReportIntentAttachment(
+        draft_id,
+        attachment_id
+      );
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
           },
         ],
       };

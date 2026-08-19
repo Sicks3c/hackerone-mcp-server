@@ -132,6 +132,64 @@ async function h1Post(
   return h1PostRaw(path, body, contentType);
 }
 
+// Multipart POST used for file uploads (report intent attachments).
+// Content-Type is left to node-fetch so the multipart boundary is set.
+async function h1PostFormData(path: string, form: FormData): Promise<any> {
+  const url = `${H1_BASE}${path}`;
+
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(1000 * Math.pow(2, attempt));
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${getAuth()}`,
+          Accept: "application/json",
+        },
+        body: form,
+      });
+
+      if (res.status === 429) {
+        const retryAfter = res.headers.get("retry-after");
+        await sleep(retryAfter ? parseInt(retryAfter, 10) * 1000 : 5000);
+        continue;
+      }
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`HackerOne API error ${res.status}: ${text}`);
+      }
+
+      const text = await res.text();
+      return text ? JSON.parse(text) : {};
+    } catch (err: any) {
+      lastErr = err;
+      if (err.message?.includes("HackerOne API error")) throw err;
+    }
+  }
+  throw lastErr ?? new Error("h1PostFormData failed after retries");
+}
+
+async function h1Delete(path: string): Promise<any> {
+  const url = `${H1_BASE}${path}`;
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Basic ${getAuth()}`,
+      Accept: "application/json",
+    },
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HackerOne API error ${res.status}: ${text}`);
+  }
+
+  const text = await res.text();
+  return text ? JSON.parse(text) : {};
+}
+
 async function h1PostRaw(
   path: string,
   body: any,
@@ -779,6 +837,98 @@ export async function getReportIntent(id: string) {
 export async function listReportIntents() {
   const allData = await h1FetchAllPages("/hackers/report_intents");
   return allData.map(mapReportIntent);
+}
+
+// ── Report intent attachments ─────────────────────────────────────
+// Attachments can only be uploaded to report intents (drafts) via the
+// hacker API — not to submitted reports or comments. Once uploaded, an
+// attachment can be referenced in markdown text (description, and later
+// the submitted report) with {F<id>} as a link or !{F<id>} to embed an
+// image inline.
+function mapAttachment(a: any) {
+  return {
+    id: a.id,
+    file_name: a.attributes?.file_name,
+    content_type: a.attributes?.content_type,
+    file_size: a.attributes?.file_size,
+    expiring_url: a.attributes?.expiring_url,
+    markdown_reference: `{F${a.id}}`,
+    markdown_embed: `!{F${a.id}}`,
+  };
+}
+
+const MIME_BY_EXT: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  ".pdf": "application/pdf",
+  ".txt": "text/plain",
+  ".log": "text/plain",
+  ".md": "text/markdown",
+  ".json": "application/json",
+  ".html": "text/html",
+  ".zip": "application/zip",
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+};
+
+export async function uploadReportIntentAttachments(
+  intentId: string,
+  filePaths: string[]
+) {
+  assertDraftsEnabled();
+  if (!filePaths.length) {
+    throw new Error("No file paths provided");
+  }
+
+  const { readFile } = await import("fs/promises");
+  const { basename, extname } = await import("path");
+
+  const form = new FormData();
+  for (const filePath of filePaths) {
+    const data = await readFile(filePath);
+    const fileName = basename(filePath);
+    const mime =
+      MIME_BY_EXT[extname(fileName).toLowerCase()] ??
+      "application/octet-stream";
+    form.append("files[]", new Blob([data], { type: mime }), fileName);
+  }
+
+  const result = await h1PostFormData(
+    `/hackers/report_intents/${intentId}/attachments`,
+    form
+  );
+  const uploaded = Array.isArray(result.data) ? result.data : [result.data];
+  return {
+    report_intent_id: intentId,
+    attachments: uploaded.filter(Boolean).map(mapAttachment),
+  };
+}
+
+export async function getReportIntentAttachments(intentId: string) {
+  const data = await h1Fetch(
+    `/hackers/report_intents/${intentId}/attachments`,
+    undefined,
+    { skipCache: true }
+  );
+  return (data.data ?? []).map(mapAttachment);
+}
+
+export async function deleteReportIntentAttachment(
+  intentId: string,
+  attachmentId: string
+) {
+  assertDraftsEnabled();
+  const result = await h1Delete(
+    `/hackers/report_intents/${intentId}/attachments/${attachmentId}`
+  );
+  return {
+    deleted_attachment_id: attachmentId,
+    remaining_attachments: (result.data ?? []).map(mapAttachment),
+  };
 }
 
 // ── Search disclosed reports ──────────────────────────────────────

@@ -51,7 +51,7 @@ Or add manually to `~/.claude.json`:
 ```bash
 claude
 > /mcp
-# You should see "hackerone" listed with 13 tools (16 with writes, +3 with HAI drafts)
+# You should see "hackerone" listed with 13 tools (16 with writes, +6 with HAI drafts)
 ```
 
 ## Enabling write operations
@@ -69,7 +69,7 @@ claude mcp add hackerone \
 
 ## Enabling HAI report drafts
 
-To let HAI (HackerOne's Report Assistant) review draft reports, set `H1_ALLOW_DRAFTS=true`. This enables the `create_report_draft`, `get_report_draft`, and `list_report_drafts` tools. Drafts (report intents) are private to you — they are never submitted to the program by these tools, and the program must have Report Assistant enabled:
+To let HAI (HackerOne's Report Assistant) review draft reports, set `H1_ALLOW_DRAFTS=true`. This enables the `create_report_draft`, `get_report_draft`, `list_report_drafts`, `upload_draft_attachments`, `list_draft_attachments`, and `delete_draft_attachment` tools. Drafts (report intents) are private to you — they are never submitted to the program by these tools, and the program must have Report Assistant enabled:
 
 ```bash
 claude mcp add hackerone \
@@ -115,6 +115,9 @@ claude mcp add hackerone \
 | `create_report_draft` | Create a draft report (report intent) for HAI to review — never submitted to the program |
 | `get_report_draft` | Get a draft by ID; poll until HAI's jobs finish and state is `ready_to_submit` |
 | `list_report_drafts` | List your HAI report drafts and their states |
+| `upload_draft_attachments` | Upload files (screenshots, logs, PoC) to a draft; returns `{F<id>}` link and `!{F<id>}` embed syntax |
+| `list_draft_attachments` | List attachments on a draft with their markdown references |
+| `delete_draft_attachment` | Delete an attachment from a draft (only before submission) |
 
 ## Usage Examples
 
@@ -131,6 +134,11 @@ Add a comment to report #2345678: "Here's the updated PoC with the new endpoint.
 **Get HAI feedback on a draft** (requires `H1_ALLOW_DRAFTS=true`):
 ```
 Create a HAI draft for the uber program with this finding: [paste]. Poll it until it's ready_to_submit and show me HAI's improved write-up.
+```
+
+**Add screenshots to a draft** (requires `H1_ALLOW_DRAFTS=true`):
+```
+Upload poc-screenshot.png and request-log.txt to draft #1234, then embed the screenshot in the description.
 ```
 
 **Draft a report matching your style:**

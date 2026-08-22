@@ -437,7 +437,17 @@ export async function listPrograms(pageSize = 50) {
 // ── Get program details ───────────────────────────────────────────
 export async function getProgramDetails(handle: string) {
   const data = await h1Fetch(`/hackers/programs/${handle}`);
-  const p = data.data;
+  // Unlike the collection/sub-resource endpoints, this one has been observed
+  // to return the program resource directly (no `data` envelope) rather than
+  // the usual JSON:API `{ data: {...} }` wrapper.
+  const p = data.data ?? data;
+  if (!p?.attributes) {
+    throw new Error(
+      `Unexpected response shape from /hackers/programs/${handle}: ${JSON.stringify(
+        data
+      )}`
+    );
+  }
   const attrs = p.attributes;
 
   return {

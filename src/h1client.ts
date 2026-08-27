@@ -107,6 +107,18 @@ export const WRITES_ENABLED = process.env.H1_ALLOW_WRITES === "true";
 // Drafts are private to the hacker and are never submitted to the program.
 export const DRAFTS_ENABLED = process.env.H1_ALLOW_DRAFTS === "true";
 
+// Set H1_ALLOW_FINANCIAL=true to expose financial data
+// (get_earnings, get_balance).
+export const FINANCIAL_ENABLED = process.env.H1_ALLOW_FINANCIAL === "true";
+
+function assertFinancialEnabled(): void {
+  if (!FINANCIAL_ENABLED) {
+    throw new Error(
+      "Financial data access is disabled. Set H1_ALLOW_FINANCIAL=true in the server environment to enable it."
+    );
+  }
+}
+
 function assertWritesEnabled(): void {
   if (!WRITES_ENABLED) {
     throw new Error(
@@ -602,6 +614,7 @@ export async function getProgramWeaknesses(handle: string, pageSize = 100) {
 
 // ── Get earnings ──────────────────────────────────────────────────
 export async function getEarnings(pageSize = 100) {
+  assertFinancialEnabled();
   const data = await h1Fetch("/hackers/payments/earnings", {
     "page[size]": String(pageSize),
   });
@@ -639,6 +652,7 @@ export async function getHackerProfile() {
 
 // ── Get balance ───────────────────────────────────────────────────
 export async function getBalance() {
+  assertFinancialEnabled();
   const data = await h1Fetch("/hackers/payments/balance");
   // The balance endpoint may return differently; handle both formats
   if (data.data) {

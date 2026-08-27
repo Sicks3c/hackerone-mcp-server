@@ -27,6 +27,7 @@ import {
   searchDisclosedReports,
   WRITES_ENABLED,
   DRAFTS_ENABLED,
+  FINANCIAL_ENABLED,
 } from "./h1client.js";
 
 const server = new McpServer({
@@ -384,6 +385,8 @@ server.tool(
   }
 );
 
+// ── Financial tools (only registered when H1_ALLOW_FINANCIAL=true) ─
+if (FINANCIAL_ENABLED) {
 // ── Tool: get_earnings ──────────────────────────────────────────
 server.tool(
   "get_earnings",
@@ -416,6 +419,9 @@ server.tool(
   }
 );
 
+// ── End of financial tools (get_earnings) ─────────────────────────
+}
+
 // ── Tool: get_hacker_profile ──────────────────────────────────────
 server.tool(
   "get_hacker_profile",
@@ -441,6 +447,8 @@ server.tool(
   }
 );
 
+// ── Financial tools, continued (get_balance) ──────────────────────
+if (FINANCIAL_ENABLED) {
 // ── Tool: get_balance ─────────────────────────────────────────────
 server.tool(
   "get_balance",
@@ -465,6 +473,9 @@ server.tool(
     }
   }
 );
+
+// ── End of financial tools (get_balance) ──────────────────────────
+}
 
 // ── Write tools (only registered when H1_ALLOW_WRITES=true) ───────
 if (WRITES_ENABLED) {
@@ -815,6 +826,7 @@ async function main() {
   const mode = [
     WRITES_ENABLED ? "writes ENABLED" : "read-only",
     ...(DRAFTS_ENABLED ? ["HAI drafts ENABLED"] : []),
+    ...(FINANCIAL_ENABLED ? ["financial data ENABLED"] : []),
   ].join(", ");
   console.error(`HackerOne MCP server running on stdio (${mode})`);
 }

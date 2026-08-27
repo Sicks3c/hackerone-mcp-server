@@ -2,7 +2,7 @@
 
 > **Disclaimer:** This is an unofficial, community-built project. It is not affiliated with, endorsed by, or maintained by HackerOne. "HackerOne" is a trademark of HackerOne, Inc. This project simply integrates with their publicly documented [Hacker API](https://api.hackerone.com/hacker-resources/).
 
-MCP server that gives Claude Code (or any MCP client) full access to your HackerOne reports, programs, earnings, and scope data via the HackerOne API. **Read-only by default** — write tools (`submit_report`, `add_comment`, `close_report`) are only enabled when you set `H1_ALLOW_WRITES=true`, and HAI report drafts (`create_report_draft` & co.) when you set `H1_ALLOW_DRAFTS=true`.
+MCP server that gives Claude Code (or any MCP client) full access to your HackerOne reports, programs, earnings, and scope data via the HackerOne API. **Read-only by default** — write tools (`submit_report`, `add_comment`, `close_report`) are only enabled when you set `H1_ALLOW_WRITES=true`, HAI report drafts (`create_report_draft` & co.) with `H1_ALLOW_DRAFTS=true`, and financial data (`get_earnings`, `get_balance`) with `H1_ALLOW_FINANCIAL=true`.
 
 ## Setup
 
@@ -51,7 +51,7 @@ Or add manually to `~/.claude.json`:
 ```bash
 claude
 > /mcp
-# You should see "hackerone" listed with 13 tools (16 with writes, +6 with HAI drafts)
+# You should see "hackerone" listed with 11 tools (+3 writes, +6 HAI drafts, +2 financial)
 ```
 
 ## Enabling write operations
@@ -80,6 +80,19 @@ claude mcp add hackerone \
   -- node /path/to/hackerone-mcp-server/dist/index.js
 ```
 
+## Enabling financial data access
+
+`get_earnings` and `get_balance` are hidden by default. To expose your bounty earnings history and current balance, set `H1_ALLOW_FINANCIAL=true`:
+
+```bash
+claude mcp add hackerone \
+  -e H1_USERNAME=your-username \
+  -e H1_API_TOKEN=your-api-token \
+  -e H1_ALLOW_FINANCIAL=true \
+  -s user \
+  -- node /path/to/hackerone-mcp-server/dist/index.js
+```
+
 ## Tools
 
 ### Read
@@ -94,11 +107,16 @@ claude mcp add hackerone \
 | `get_program_details` | Get single program info: policy, response times, metrics |
 | `get_program_scope` | Get all in-scope assets for a program (auto-paginates) |
 | `get_program_weaknesses` | Get accepted CWE/weakness types for a program (auto-paginates) |
-| `get_earnings` | Get your bounty earnings history (amounts, dates, programs) |
 | `get_hacker_profile` | Get your reputation, signal, impact, and rank |
-| `get_balance` | Get your current unpaid bounty balance |
 | `analyze_report_patterns` | Analyze your hunting patterns (severity distribution, top programs, weakness types) |
 | `search_disclosed_reports` | Search publicly disclosed reports on hacktivity — great for recon and learning |
+
+### Financial (requires `H1_ALLOW_FINANCIAL=true`)
+
+| Tool | Description |
+|------|-------------|
+| `get_earnings` | Get your bounty earnings history (amounts, dates, programs) |
+| `get_balance` | Get your current unpaid bounty balance |
 
 ### Write (requires `H1_ALLOW_WRITES=true`)
 
@@ -166,7 +184,7 @@ Show me the uber program details — what are their response times?
 Show my hacker profile — what's my current reputation and signal?
 ```
 
-**Track earnings:**
+**Track earnings** (requires `H1_ALLOW_FINANCIAL=true`):
 ```
 Show my recent bounty earnings and current balance
 ```
@@ -182,6 +200,7 @@ Analyze my report patterns — what severity gets resolved most?
 - Runs locally over stdio — your credentials never leave your machine
 - Read-only by default; write operations (submit reports, add comments, close reports) are only registered when `H1_ALLOW_WRITES=true`, and the HTTP layer refuses POST requests otherwise
 - HAI report drafts (report intents) are gated separately behind `H1_ALLOW_DRAFTS=true` — drafts stay private and are never submitted to the program
+- Financial data (earnings history, balance) is hidden unless `H1_ALLOW_FINANCIAL=true`
 - Auto-paginates programs, scope, and weakness endpoints so nothing gets silently truncated
 - Uses server-side API filters where available (program, severity, state) for faster searches
 - Built-in retry with exponential backoff for rate limit handling

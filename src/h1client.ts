@@ -107,18 +107,6 @@ export const WRITES_ENABLED = process.env.H1_ALLOW_WRITES === "true";
 // Drafts are private to the hacker and are never submitted to the program.
 export const DRAFTS_ENABLED = process.env.H1_ALLOW_DRAFTS === "true";
 
-// Set H1_ALLOW_FINANCIAL=true to expose financial data
-// (get_earnings, get_balance).
-export const FINANCIAL_ENABLED = process.env.H1_ALLOW_FINANCIAL === "true";
-
-function assertFinancialEnabled(): void {
-  if (!FINANCIAL_ENABLED) {
-    throw new Error(
-      "Financial data access is disabled. Set H1_ALLOW_FINANCIAL=true in the server environment to enable it."
-    );
-  }
-}
-
 function assertWritesEnabled(): void {
   if (!WRITES_ENABLED) {
     throw new Error(
@@ -612,24 +600,6 @@ export async function getProgramWeaknesses(handle: string, pageSize = 100) {
   return weaknesses;
 }
 
-// ── Get earnings ──────────────────────────────────────────────────
-export async function getEarnings(pageSize = 100) {
-  assertFinancialEnabled();
-  const data = await h1Fetch("/hackers/payments/earnings", {
-    "page[size]": String(pageSize),
-  });
-
-  return data.data.map((e: any) => ({
-    id: e.id,
-    amount: e.attributes.amount,
-    awarded_by: e.attributes.awarded_by_name,
-    created_at: e.attributes.created_at,
-    currency:
-      e.relationships?.program?.data?.attributes?.currency ?? null,
-    program: e.relationships?.program?.data?.attributes?.handle ?? null,
-  }));
-}
-
 // ── Get hacker profile ────────────────────────────────────────────
 export async function getHackerProfile() {
   const data = await h1Fetch("/hackers/me");
@@ -648,22 +618,6 @@ export async function getHackerProfile() {
     created_at: attrs.created_at,
     hackerone_triager: attrs.hackerone_triager,
   };
-}
-
-// ── Get balance ───────────────────────────────────────────────────
-export async function getBalance() {
-  assertFinancialEnabled();
-  const data = await h1Fetch("/hackers/payments/balance");
-  // The balance endpoint may return differently; handle both formats
-  if (data.data) {
-    const attrs = data.data.attributes ?? data.data;
-    return {
-      balance: attrs.balance ?? attrs.amount ?? null,
-      currency: attrs.currency ?? null,
-      pending: attrs.pending ?? null,
-    };
-  }
-  return data;
 }
 
 // ── Get report summary (condensed for Claude context) ──────────────

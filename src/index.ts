@@ -12,9 +12,7 @@ import {
   getProgramDetails,
   getProgramScope,
   getProgramWeaknesses,
-  getEarnings,
   getHackerProfile,
-  getBalance,
   submitReport,
   addComment,
   closeReport,
@@ -27,12 +25,11 @@ import {
   searchDisclosedReports,
   WRITES_ENABLED,
   DRAFTS_ENABLED,
-  FINANCIAL_ENABLED,
 } from "./h1client.js";
 
 const server = new McpServer({
   name: "hackerone",
-  version: "2.0.0",
+  version: "3.0.0",
 });
 
 // ── Tool: search_reports ───────────────────────────────────────────
@@ -385,43 +382,6 @@ server.tool(
   }
 );
 
-// ── Financial tools (only registered when H1_ALLOW_FINANCIAL=true) ─
-if (FINANCIAL_ENABLED) {
-// ── Tool: get_earnings ──────────────────────────────────────────
-server.tool(
-  "get_earnings",
-  "Get your bounty earnings history. Shows amounts, currency, dates, and which programs paid out.",
-  {
-    page_size: z
-      .number()
-      .min(1)
-      .max(100)
-      .optional()
-      .describe("Number of earnings to return (default 100)"),
-  },
-  async ({ page_size }) => {
-    try {
-      const earnings = await getEarnings(page_size);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(earnings, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ── End of financial tools (get_earnings) ─────────────────────────
-}
-
 // ── Tool: get_hacker_profile ──────────────────────────────────────
 server.tool(
   "get_hacker_profile",
@@ -446,36 +406,6 @@ server.tool(
     }
   }
 );
-
-// ── Financial tools, continued (get_balance) ──────────────────────
-if (FINANCIAL_ENABLED) {
-// ── Tool: get_balance ─────────────────────────────────────────────
-server.tool(
-  "get_balance",
-  "Get your current unpaid bounty balance on HackerOne.",
-  {},
-  async () => {
-    try {
-      const balance = await getBalance();
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(balance, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ── End of financial tools (get_balance) ──────────────────────────
-}
 
 // ── Write tools (only registered when H1_ALLOW_WRITES=true) ───────
 if (WRITES_ENABLED) {
@@ -826,7 +756,6 @@ async function main() {
   const mode = [
     WRITES_ENABLED ? "writes ENABLED" : "read-only",
     ...(DRAFTS_ENABLED ? ["HAI drafts ENABLED"] : []),
-    ...(FINANCIAL_ENABLED ? ["financial data ENABLED"] : []),
   ].join(", ");
   console.error(`HackerOne MCP server running on stdio (${mode})`);
 }

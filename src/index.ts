@@ -101,7 +101,7 @@ server.tool(
 // ── Tool: get_report ───────────────────────────────────────────────
 server.tool(
   "get_report",
-  "Get the full details of a specific HackerOne report by ID. Returns title, vulnerability details, impact, severity, full CVSS vector/score, bounty amounts, attachments, timestamps, and program info.",
+  "Get the full details of a specific HackerOne report by ID. Returns title, vulnerability details, impact, severity, full CVSS vector/score, attachments, timestamps, and program info.",
   {
     report_id: z.string().describe("The HackerOne report ID"),
   },
@@ -385,7 +385,7 @@ server.tool(
 // ── Tool: get_hacker_profile ──────────────────────────────────────
 server.tool(
   "get_hacker_profile",
-  "Get your HackerOne account summary: username, report record (totals by state/severity, bounties), and payments balance. Note: reputation/signal/impact/rank are not exposed by the Hacker API.",
+  "Get your HackerOne account summary: username and report record (totals by state/severity, count of reports with bounty). Note: reputation/signal/impact/rank are not exposed by the Hacker API.",
   {},
   async () => {
     try {
@@ -712,7 +712,7 @@ server.tool(
 // ── Tool: search_disclosed_reports ────────────────────────────────
 server.tool(
   "search_disclosed_reports",
-  "Search publicly disclosed HackerOne reports (hacktivity). Useful for learning what gets paid, finding prior art, and understanding what a program considers valid.",
+  "Search publicly disclosed HackerOne reports (hacktivity). Useful for finding prior art and understanding what a program considers valid.",
   {
     program: z
       .string()

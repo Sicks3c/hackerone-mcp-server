@@ -87,14 +87,14 @@ claude mcp add hackerone \
 | Tool | Description |
 |------|-------------|
 | `search_reports` | Search and filter your reports by keyword, program, severity, or state |
-| `get_report` | Get full report details including CVSS vector, bounty amounts, and attachments |
+| `get_report` | Get full report details including CVSS vector and attachments |
 | `get_report_with_conversation` | Get a report with its triage conversation thread |
 | `get_report_activities` | Get activity timeline (comments, state changes, bounties) |
 | `list_programs` | List all bug bounty programs you have access to (auto-paginates) |
 | `get_program_details` | Get single program info: policy, response times, metrics |
 | `get_program_scope` | Get all in-scope assets for a program (auto-paginates) |
 | `get_program_weaknesses` | Get accepted CWE/weakness types for a program (auto-paginates) |
-| `get_hacker_profile` | Account summary derived from the API: username, report record, balance (the Hacker API exposes no reputation/signal/rank endpoint) |
+| `get_hacker_profile` | Account summary derived from the API: username, report record (the Hacker API exposes no reputation/signal/rank endpoint) |
 | `analyze_report_patterns` | Analyze your hunting patterns (severity distribution, top programs, weakness types) |
 | `search_disclosed_reports` | Search publicly disclosed reports on hacktivity — great for recon and learning |
 

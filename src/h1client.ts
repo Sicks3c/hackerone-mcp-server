@@ -415,7 +415,6 @@ export async function searchReports(opts: SearchReportsOpts = {}) {
 }
 
 function mapReportSummary(r: any) {
-  const bounty = r.relationships?.bounties?.data?.[0]?.attributes;
   return {
     id: r.id,
     title: r.attributes.title,
@@ -424,22 +423,18 @@ function mapReportSummary(r: any) {
     severity: r.attributes.severity_rating,
     created_at: r.attributes.created_at,
     disclosed_at: r.attributes.disclosed_at,
-    bounty_awarded_at: r.attributes.bounty_awarded_at,
-    bounty_amount: bounty?.amount ?? null,
-    bounty_bonus: bounty?.bonus_amount ?? null,
     _vuln_info: r.attributes.vulnerability_information,
     weakness: r.relationships?.weakness?.data?.attributes?.name ?? null,
     program: r.relationships?.program?.data?.attributes?.handle ?? null,
   };
 }
 
-// ── Get single report (with full CVSS + bounty) ──────────────────
+// ── Get single report (with full CVSS) ───────────────────────────
 export async function getReport(reportId: string) {
   const data = await h1Fetch(`/hackers/reports/${reportId}`);
   const r = data.data;
   const attrs = r.attributes;
   const sev = r.relationships?.severity?.data?.attributes;
-  const bounty = r.relationships?.bounties?.data?.[0]?.attributes;
   const attachments = r.relationships?.attachments?.data ?? [];
 
   return {
@@ -449,7 +444,6 @@ export async function getReport(reportId: string) {
     created_at: attrs.created_at,
     closed_at: attrs.closed_at,
     triaged_at: attrs.triaged_at,
-    bounty_awarded_at: attrs.bounty_awarded_at,
     disclosed_at: attrs.disclosed_at,
     severity: sev?.rating ?? null,
     cvss_score: sev?.score ?? null,
@@ -465,8 +459,6 @@ export async function getReport(reportId: string) {
           availability: sev.availability,
         }
       : null,
-    bounty_amount: bounty?.amount ?? null,
-    bounty_bonus: bounty?.bonus_amount ?? null,
     vulnerability_information: attrs.vulnerability_information,
     impact: attrs.impact,
     weakness: r.relationships?.weakness?.data?.attributes?.name ?? null,
@@ -604,8 +596,8 @@ export async function getProgramWeaknesses(handle: string, pageSize = 100) {
 // The Hacker API has no self-profile endpoint: GET /hackers/me returns
 // 401 even with valid credentials, and the official docs list no such
 // resource — reputation/signal/impact/rank are not exposed. Derive what
-// the API does expose: the report record (/hackers/me/reports) and the
-// payments balance (/hackers/payments/balance).
+// the API does expose: the report record (/hackers/me/reports). Bounty
+// amounts and the payments balance are intentionally not returned.
 export async function getHackerProfile() {
   const reports = await h1FetchAllPages("/hackers/me/reports");
 
@@ -620,14 +612,6 @@ export async function getHackerProfile() {
     if (r.attributes?.bounty_awarded_at) withBounty++;
   }
 
-  let balance: number | null = null;
-  try {
-    const b = await h1Fetch("/hackers/payments/balance");
-    balance = b.data?.balance ?? null;
-  } catch {
-    balance = null; // never fail the whole profile over the balance probe
-  }
-
   return {
     username: process.env.H1_USERNAME ?? null,
     note: "reputation/signal/impact/rank are not exposed by the HackerOne Hacker API",
@@ -635,7 +619,6 @@ export async function getHackerProfile() {
     reports_by_state: byState,
     reports_by_severity: bySeverity,
     reports_with_bounty: withBounty,
-    balance,
   };
 }
 
@@ -940,7 +923,6 @@ export async function searchDisclosedReports(opts: {
     title: r.attributes?.title ?? r.attributes?.raw_title,
     severity: r.attributes?.severity_rating,
     disclosed_at: r.attributes?.disclosed_at,
-    total_awarded_amount: r.attributes?.total_awarded_amount,
     upvotes: r.attributes?.vote_count ?? r.attributes?.upvotes,
     url: r.attributes?.url ?? `https://hackerone.com/reports/${r.id}`,
     reporter:

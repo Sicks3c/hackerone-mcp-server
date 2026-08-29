@@ -601,22 +601,41 @@ export async function getProgramWeaknesses(handle: string, pageSize = 100) {
 }
 
 // ── Get hacker profile ────────────────────────────────────────────
+// The Hacker API has no self-profile endpoint: GET /hackers/me returns
+// 401 even with valid credentials, and the official docs list no such
+// resource — reputation/signal/impact/rank are not exposed. Derive what
+// the API does expose: the report record (/hackers/me/reports) and the
+// payments balance (/hackers/payments/balance).
 export async function getHackerProfile() {
-  const data = await h1Fetch("/hackers/me");
-  const u = data.data;
-  const attrs = u.attributes;
+  const reports = await h1FetchAllPages("/hackers/me/reports");
+
+  const byState: Record<string, number> = {};
+  const bySeverity: Record<string, number> = {};
+  let withBounty = 0;
+  for (const r of reports) {
+    const state = r.attributes?.state ?? "unknown";
+    byState[state] = (byState[state] ?? 0) + 1;
+    const sev = r.attributes?.severity_rating;
+    if (sev) bySeverity[sev] = (bySeverity[sev] ?? 0) + 1;
+    if (r.attributes?.bounty_awarded_at) withBounty++;
+  }
+
+  let balance: number | null = null;
+  try {
+    const b = await h1Fetch("/hackers/payments/balance");
+    balance = b.data?.balance ?? null;
+  } catch {
+    balance = null; // never fail the whole profile over the balance probe
+  }
 
   return {
-    id: u.id,
-    username: attrs.username,
-    name: attrs.name,
-    bio: attrs.bio,
-    reputation: attrs.reputation,
-    signal: attrs.signal,
-    impact: attrs.impact,
-    rank: attrs.rank,
-    created_at: attrs.created_at,
-    hackerone_triager: attrs.hackerone_triager,
+    username: process.env.H1_USERNAME ?? null,
+    note: "reputation/signal/impact/rank are not exposed by the HackerOne Hacker API",
+    reports_total: reports.length,
+    reports_by_state: byState,
+    reports_by_severity: bySeverity,
+    reports_with_bounty: withBounty,
+    balance,
   };
 }
 

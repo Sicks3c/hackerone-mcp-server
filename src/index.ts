@@ -385,7 +385,7 @@ server.tool(
 // ── Tool: get_hacker_profile ──────────────────────────────────────
 server.tool(
   "get_hacker_profile",
-  "Get your HackerOne hacker profile: reputation, signal, impact, rank, and account info.",
+  "Get your HackerOne account summary: username, report record (totals by state/severity, bounties), and payments balance. Note: reputation/signal/impact/rank are not exposed by the Hacker API.",
   {},
   async () => {
     try {

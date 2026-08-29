@@ -94,7 +94,7 @@ claude mcp add hackerone \
 | `get_program_details` | Get single program info: policy, response times, metrics |
 | `get_program_scope` | Get all in-scope assets for a program (auto-paginates) |
 | `get_program_weaknesses` | Get accepted CWE/weakness types for a program (auto-paginates) |
-| `get_hacker_profile` | Get your reputation, signal, impact, and rank |
+| `get_hacker_profile` | Account summary derived from the API: username, report record, balance (the Hacker API exposes no reputation/signal/rank endpoint) |
 | `analyze_report_patterns` | Analyze your hunting patterns (severity distribution, top programs, weakness types) |
 | `search_disclosed_reports` | Search publicly disclosed reports on hacktivity — great for recon and learning |
 

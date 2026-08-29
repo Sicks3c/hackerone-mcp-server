@@ -193,7 +193,8 @@ async function h1Delete(path: string): Promise<any> {
 async function h1PostRaw(
   path: string,
   body: any,
-  contentType = "application/json"
+  contentType = "application/json",
+  method = "POST"
 ): Promise<any> {
   const url = `${H1_BASE}${path}`;
 
@@ -202,7 +203,7 @@ async function h1PostRaw(
     if (attempt > 0) await sleep(1000 * Math.pow(2, attempt));
     try {
       const res = await fetch(url, {
-        method: "POST",
+        method,
         headers: {
           Authorization: `Basic ${getAuth()}`,
           Accept: "application/json",
@@ -794,6 +795,24 @@ export async function createReportIntent(
   };
 
   const result = await h1PostRaw("/hackers/report_intents", body);
+  return mapReportIntent(result.data);
+}
+
+export async function updateReportIntent(id: string, description: string) {
+  assertDraftsEnabled();
+  const body = {
+    data: {
+      type: "report-intent",
+      attributes: { description },
+    },
+  };
+
+  const result = await h1PostRaw(
+    `/hackers/report_intents/${id}`,
+    body,
+    "application/json",
+    "PATCH"
+  );
   return mapReportIntent(result.data);
 }
 

@@ -2,6 +2,7 @@ import fetch, { type RequestInit } from "node-fetch";
 import { type Readable } from "stream";
 
 const H1_BASE = "https://api.hackerone.com/v1";
+const FETCH_TIMEOUT_MS = 30_000; // abort stalled requests instead of hanging forever
 
 // ── Simple in-memory cache ────────────────────────────────────────
 interface CacheEntry {
@@ -204,6 +205,7 @@ async function h1PostRaw(
     try {
       const res = await fetch(url, {
         method,
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         headers: {
           Authorization: `Basic ${getAuth()}`,
           Accept: "application/json",
@@ -233,6 +235,11 @@ async function h1PostRaw(
       lastErr = err;
       if (err.message?.includes("HackerOne API error")) throw err;
     }
+  }
+  if (lastErr?.name === "AbortError") {
+    throw new Error(
+      `HackerOne API request timed out after ${FETCH_TIMEOUT_MS / 1000}s (retries exhausted)`
+    );
   }
   throw lastErr ?? new Error("h1Post failed after retries");
 }
@@ -798,22 +805,75 @@ export async function createReportIntent(
   return mapReportIntent(result.data);
 }
 
+export async function deleteReportIntent(id: string) {
+  assertDraftsEnabled();
+  await h1Delete(`/hackers/report_intents/${id}`);
+  return { deleted_draft_id: id };
+}
+
+// Resolve a numeric program id (from a report intent's program relationship)
+// to the handle that createReportIntent needs.
+async function resolveProgramHandle(programId: string): Promise<string> {
+  const programs = await h1FetchAllPages("/hackers/programs");
+  const match = programs.find((p: any) => String(p.id) === String(programId));
+  const handle = match?.attributes?.handle;
+  if (!handle) {
+    throw new Error(
+      `Could not resolve program id ${programId} to a handle via /hackers/programs`
+    );
+  }
+  return handle;
+}
+
+const DRAFT_REPLACE_POLL_INTERVAL_MS = 5_000;
+const DRAFT_REPLACE_TIMEOUT_MS = 240_000; // HAI jobs can take a few minutes
+
+// "Updating" a draft replaces it: the API's PATCH re-triggers HAI on the same
+// intent, so instead we fetch the old draft, create a new one with the new
+// description for the same program, wait until HAI finishes
+// (state == "ready_to_submit"), and only then delete the old draft. If the new
+// draft is not ready in time, the old draft is kept and both IDs are returned.
+// Attachments on the old draft are NOT carried over — re-upload them to the
+// new draft and update any {F<id>} references.
 export async function updateReportIntent(id: string, description: string) {
   assertDraftsEnabled();
-  const body = {
-    data: {
-      type: "report-intent",
-      attributes: { description },
-    },
-  };
 
-  const result = await h1PostRaw(
-    `/hackers/report_intents/${id}`,
-    body,
-    "application/json",
-    "PATCH"
-  );
-  return mapReportIntent(result.data);
+  const oldRaw = await h1Fetch(`/hackers/report_intents/${id}`, undefined, {
+    skipCache: true,
+  });
+  const programId = oldRaw.data?.relationships?.program?.data?.id;
+  if (!programId) {
+    throw new Error(
+      "Old draft has no program relationship; cannot recreate it"
+    );
+  }
+  const teamHandle = await resolveProgramHandle(programId);
+
+  const created = await createReportIntent(teamHandle, description);
+
+  const deadline = Date.now() + DRAFT_REPLACE_TIMEOUT_MS;
+  let current = created;
+  while (current.state !== "ready_to_submit" && Date.now() < deadline) {
+    if (current.has_failing_jobs) break;
+    await sleep(DRAFT_REPLACE_POLL_INTERVAL_MS);
+    current = await getReportIntent(created.id);
+  }
+
+  if (current.state !== "ready_to_submit") {
+    return {
+      ...current,
+      old_draft_id: id,
+      old_draft_deleted: false,
+      note: `New draft ${created.id} is not ready_to_submit yet (state: ${current.state}); old draft ${id} was kept. Poll get_report_draft on the new ID until it is ready.`,
+    };
+  }
+
+  await deleteReportIntent(id);
+  return {
+    ...current,
+    replaced_draft_id: id,
+    old_draft_deleted: true,
+  };
 }
 
 export async function getReportIntent(id: string) {

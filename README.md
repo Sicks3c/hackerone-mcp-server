@@ -111,7 +111,7 @@ claude mcp add hackerone \
 | Tool | Description |
 |------|-------------|
 | `create_report_draft` | Create a draft report (report intent) for HAI to review — never submitted to the program |
-| `update_report_draft` | Update a draft's description (re-triggers HAI analysis) |
+| `update_report_draft` | Replace a draft with a new one carrying the new description; deletes the old draft once the new one is `ready_to_submit` (attachments are not carried over) |
 | `get_report_draft` | Get a draft by ID; poll until HAI's jobs finish and state is `ready_to_submit` |
 | `list_report_drafts` | List your HAI report drafts and their states |
 | `upload_draft_attachments` | Upload files (screenshots, logs, PoC) to a draft; returns `{F<id>}` link and `!{F<id>}` embed syntax |

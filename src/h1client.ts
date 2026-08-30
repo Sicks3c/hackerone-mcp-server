@@ -604,18 +604,9 @@ export async function submitReport(opts: {
       },
     },
   };
-
-  if (opts.weakness_id) {
-    relationships.weakness = {
-      data: { type: "weakness", id: opts.weakness_id },
-    };
-  }
-
-  if (opts.structured_scope_id) {
-    relationships.structured_scope = {
-      data: { type: "structured-scope", id: opts.structured_scope_id },
-    };
-  }
+    // NOTE: the hacker report-submission API expects weakness_id / structured_scope_id
+    // as integer ATTRIBUTES, not as JSON:API relationships. Sending them as
+    // relationships makes the API respond 422 "Weakness can't be blank".
 
   const severity: any = {};
   if (opts.severity_rating) {
@@ -631,6 +622,8 @@ export async function submitReport(opts: {
         vulnerability_information: opts.vulnerability_information,
         impact: opts.impact ?? "",
         severity_rating: opts.severity_rating,
+        ...(opts.weakness_id ? { weakness_id: Number(opts.weakness_id) } : {}),
+        ...(opts.structured_scope_id ? { structured_scope_id: Number(opts.structured_scope_id) } : {}),
       },
       relationships,
     },

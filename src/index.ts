@@ -12,7 +12,6 @@ import {
   getProgramDetails,
   getProgramScope,
   getProgramWeaknesses,
-  getHackerProfile,
   submitReport,
   addComment,
   closeReport,
@@ -371,31 +370,6 @@ server.tool(
           {
             type: "text" as const,
             text: JSON.stringify(weaknesses, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ── Tool: get_hacker_profile ──────────────────────────────────────
-server.tool(
-  "get_hacker_profile",
-  "Get your HackerOne account summary: username and report record (totals by state/severity, count of reports with bounty). Note: reputation/signal/impact/rank are not exposed by the Hacker API.",
-  {},
-  async () => {
-    try {
-      const profile = await getHackerProfile();
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(profile, null, 2),
           },
         ],
       };

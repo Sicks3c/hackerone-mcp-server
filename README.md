@@ -51,7 +51,7 @@ Or add manually to `~/.claude.json`:
 ```bash
 claude
 > /mcp
-# You should see "hackerone" listed with 11 tools (+3 writes, +7 HAI drafts)
+# You should see "hackerone" listed with 10 tools (+3 writes, +7 HAI drafts)
 ```
 
 ## Enabling write operations
@@ -94,7 +94,6 @@ claude mcp add hackerone \
 | `get_program_details` | Get single program info: policy, response times, metrics |
 | `get_program_scope` | Get all in-scope assets for a program (auto-paginates) |
 | `get_program_weaknesses` | Get accepted CWE/weakness types for a program (auto-paginates) |
-| `get_hacker_profile` | Account summary derived from the API: username, report record (the Hacker API exposes no reputation/signal/rank endpoint) |
 | `analyze_report_patterns` | Analyze your hunting patterns (severity distribution, top programs, weakness types) |
 | `search_disclosed_reports` | Search publicly disclosed reports on hacktivity — great for recon and learning |
 
@@ -158,11 +157,6 @@ Search disclosed reports on the uber program for SSRF — what did they pay?
 **Check program details before hunting:**
 ```
 Show me the uber program details — what are their response times?
-```
-
-**Check your stats:**
-```
-Show my hacker profile — what's my current reputation and signal?
 ```
 
 **Analyze patterns:**

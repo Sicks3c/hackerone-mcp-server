@@ -600,36 +600,6 @@ export async function getProgramWeaknesses(handle: string, pageSize = 100) {
   return weaknesses;
 }
 
-// ── Get hacker profile ────────────────────────────────────────────
-// The Hacker API has no self-profile endpoint: GET /hackers/me returns
-// 401 even with valid credentials, and the official docs list no such
-// resource — reputation/signal/impact/rank are not exposed. Derive what
-// the API does expose: the report record (/hackers/me/reports). Bounty
-// amounts and the payments balance are intentionally not returned.
-export async function getHackerProfile() {
-  const reports = await h1FetchAllPages("/hackers/me/reports");
-
-  const byState: Record<string, number> = {};
-  const bySeverity: Record<string, number> = {};
-  let withBounty = 0;
-  for (const r of reports) {
-    const state = r.attributes?.state ?? "unknown";
-    byState[state] = (byState[state] ?? 0) + 1;
-    const sev = r.attributes?.severity_rating;
-    if (sev) bySeverity[sev] = (bySeverity[sev] ?? 0) + 1;
-    if (r.attributes?.bounty_awarded_at) withBounty++;
-  }
-
-  return {
-    username: process.env.H1_USERNAME ?? null,
-    note: "reputation/signal/impact/rank are not exposed by the HackerOne Hacker API",
-    reports_total: reports.length,
-    reports_by_state: byState,
-    reports_by_severity: bySeverity,
-    reports_with_bounty: withBounty,
-  };
-}
-
 // ── Get report summary (condensed for Claude context) ──────────────
 export async function getReportSummary(reportId: string) {
   const report = await getReport(reportId);

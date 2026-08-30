@@ -2,7 +2,7 @@
 
 > **Disclaimer:** This is an unofficial, community-built project. It is not affiliated with, endorsed by, or maintained by HackerOne. "HackerOne" is a trademark of HackerOne, Inc. This project simply integrates with their publicly documented [Hacker API](https://api.hackerone.com/hacker-resources/).
 
-MCP server that gives Claude Code (or any MCP client) full access to your HackerOne reports, programs, earnings, and scope data via the HackerOne API — including submitting reports and responding to triage.
+MCP server that gives Claude Code (or any MCP client) full access to your HackerOne reports, programs, and scope data via the HackerOne API. **Read-only by default** — write tools (`submit_report`, `add_comment`, `close_report`) are only enabled when you set `H1_ALLOW_WRITES=true`, and HAI report drafts (`create_report_draft` & co.) with `H1_ALLOW_DRAFTS=true`.
 
 ## Setup
 
@@ -51,7 +51,33 @@ Or add manually to `~/.claude.json`:
 ```bash
 claude
 > /mcp
-# You should see "hackerone" listed with 16 tools
+# You should see "hackerone" listed with 10 tools (+3 writes, +8 HAI drafts)
+```
+
+## Enabling write operations
+
+The server is read-only by default. To enable `submit_report`, `add_comment`, and `close_report`, set `H1_ALLOW_WRITES=true` in the server environment:
+
+```bash
+claude mcp add hackerone \
+  -e H1_USERNAME=your-username \
+  -e H1_API_TOKEN=your-api-token \
+  -e H1_ALLOW_WRITES=true \
+  -s user \
+  -- node /path/to/hackerone-mcp-server/dist/index.js
+```
+
+## Enabling HAI report drafts
+
+To let HAI (HackerOne's Report Assistant) review draft reports, set `H1_ALLOW_DRAFTS=true`. This enables the `create_report_draft`, `update_report_draft`, `delete_report_draft`, `get_report_draft`, `list_report_drafts`, `upload_draft_attachments`, `list_draft_attachments`, and `delete_draft_attachment` tools. Drafts (report intents) are private to you — they are never submitted to the program by these tools, and the program must have Report Assistant enabled:
+
+```bash
+claude mcp add hackerone \
+  -e H1_USERNAME=your-username \
+  -e H1_API_TOKEN=your-api-token \
+  -e H1_ALLOW_DRAFTS=true \
+  -s user \
+  -- node /path/to/hackerone-mcp-server/dist/index.js
 ```
 
 ## Tools
@@ -61,20 +87,17 @@ claude
 | Tool | Description |
 |------|-------------|
 | `search_reports` | Search and filter your reports by keyword, program, severity, or state |
-| `get_report` | Get full report details including CVSS vector, bounty amounts, and attachments |
+| `get_report` | Get full report details including CVSS vector and attachments |
 | `get_report_with_conversation` | Get a report with its triage conversation thread |
 | `get_report_activities` | Get activity timeline (comments, state changes, bounties) |
 | `list_programs` | List all bug bounty programs you have access to (auto-paginates) |
 | `get_program_details` | Get single program info: policy, response times, metrics |
 | `get_program_scope` | Get all in-scope assets for a program (auto-paginates) |
 | `get_program_weaknesses` | Get accepted CWE/weakness types for a program (auto-paginates) |
-| `get_earnings` | Get your bounty earnings history (amounts, dates, programs) |
-| `get_hacker_profile` | Get your reputation, signal, impact, and rank |
-| `get_balance` | Get your current unpaid bounty balance |
 | `analyze_report_patterns` | Analyze your hunting patterns (severity distribution, top programs, weakness types) |
 | `search_disclosed_reports` | Search publicly disclosed reports on hacktivity — great for recon and learning |
 
-### Write
+### Write (requires `H1_ALLOW_WRITES=true`)
 
 | Tool | Description |
 |------|-------------|
@@ -82,16 +105,39 @@ claude
 | `add_comment` | Add a comment to an existing report (respond to triage) |
 | `close_report` | Withdraw/close one of your own reports |
 
+### HAI drafts (requires `H1_ALLOW_DRAFTS=true`)
+
+| Tool | Description |
+|------|-------------|
+| `create_report_draft` | Create a draft report (report intent) for HAI to review — never submitted to the program |
+| `update_report_draft` | Update a draft's description in place (same ID — attachments and `{F<id>}` references are preserved); HAI re-analyzes asynchronously, poll the same ID until `ready_to_submit` |
+| `delete_report_draft` | Delete a draft by ID (only before submission) |
+| `get_report_draft` | Get a draft by ID; poll until HAI's jobs finish and state is `ready_to_submit` |
+| `list_report_drafts` | List your HAI report drafts and their states |
+| `upload_draft_attachments` | Upload files (screenshots, logs, PoC) to a draft; returns `{F<id>}` link and `!{F<id>}` embed syntax |
+| `list_draft_attachments` | List attachments on a draft with their markdown references |
+| `delete_draft_attachment` | Delete an attachment from a draft (only before submission) |
+
 ## Usage Examples
 
-**Submit a report directly:**
+**Submit a report directly** (requires `H1_ALLOW_WRITES=true`):
 ```
 Submit this SSRF finding to the uber program with critical severity. Here's my writeup: [paste]
 ```
 
-**Respond to triage:**
+**Respond to triage** (requires `H1_ALLOW_WRITES=true`):
 ```
 Add a comment to report #2345678: "Here's the updated PoC with the new endpoint..."
+```
+
+**Get HAI feedback on a draft** (requires `H1_ALLOW_DRAFTS=true`):
+```
+Create a HAI draft for the uber program with this finding: [paste]. Poll it until it's ready_to_submit and show me HAI's improved write-up.
+```
+
+**Add screenshots to a draft** (requires `H1_ALLOW_DRAFTS=true`):
+```
+Upload poc-screenshot.png and request-log.txt to draft #1234, then embed the screenshot in the description.
 ```
 
 **Draft a report matching your style:**
@@ -114,16 +160,6 @@ Search disclosed reports on the uber program for SSRF — what did they pay?
 Show me the uber program details — what are their response times?
 ```
 
-**Check your stats:**
-```
-Show my hacker profile — what's my current reputation and signal?
-```
-
-**Track earnings:**
-```
-Show my recent bounty earnings and current balance
-```
-
 **Analyze patterns:**
 ```
 Analyze my report patterns — what severity gets resolved most?
@@ -133,7 +169,8 @@ Analyze my report patterns — what severity gets resolved most?
 
 - Connects to the [HackerOne Hacker API v1](https://api.hackerone.com/hacker-resources/) using your personal API token
 - Runs locally over stdio — your credentials never leave your machine
-- Supports both read and write operations (submit reports, add comments, close reports)
+- Read-only by default; write operations (submit reports, add comments, close reports) are only registered when `H1_ALLOW_WRITES=true`, and the HTTP layer refuses POST requests otherwise
+- HAI report drafts (report intents) are gated separately behind `H1_ALLOW_DRAFTS=true` — drafts stay private and are never submitted to the program
 - Auto-paginates programs, scope, and weakness endpoints so nothing gets silently truncated
 - Uses server-side API filters where available (program, severity, state) for faster searches
 - Built-in retry with exponential backoff for rate limit handling

@@ -12,18 +12,25 @@ import {
   getProgramDetails,
   getProgramScope,
   getProgramWeaknesses,
-  getEarnings,
-  getHackerProfile,
-  getBalance,
   submitReport,
   addComment,
   closeReport,
+  createReportIntent,
+  updateReportIntent,
+  deleteReportIntent,
+  getReportIntent,
+  listReportIntents,
+  uploadReportIntentAttachments,
+  getReportIntentAttachments,
+  deleteReportIntentAttachment,
   searchDisclosedReports,
+  WRITES_ENABLED,
+  DRAFTS_ENABLED,
 } from "./h1client.js";
 
 const server = new McpServer({
   name: "hackerone",
-  version: "2.0.0",
+  version: "3.1.0",
 });
 
 // ── Tool: search_reports ───────────────────────────────────────────
@@ -95,7 +102,7 @@ server.tool(
 // ── Tool: get_report ───────────────────────────────────────────────
 server.tool(
   "get_report",
-  "Get the full details of a specific HackerOne report by ID. Returns title, vulnerability details, impact, severity, full CVSS vector/score, bounty amounts, attachments, timestamps, and program info.",
+  "Get the full details of a specific HackerOne report by ID. Returns title, vulnerability details, impact, severity, full CVSS vector/score, attachments, timestamps, and program info.",
   {
     report_id: z.string().describe("The HackerOne report ID"),
   },
@@ -376,88 +383,8 @@ server.tool(
   }
 );
 
-// ── Tool: get_earnings ──────────────────────────────────────────
-server.tool(
-  "get_earnings",
-  "Get your bounty earnings history. Shows amounts, currency, dates, and which programs paid out.",
-  {
-    page_size: z
-      .number()
-      .min(1)
-      .max(100)
-      .optional()
-      .describe("Number of earnings to return (default 100)"),
-  },
-  async ({ page_size }) => {
-    try {
-      const earnings = await getEarnings(page_size);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(earnings, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ── Tool: get_hacker_profile ──────────────────────────────────────
-server.tool(
-  "get_hacker_profile",
-  "Get your HackerOne hacker profile: reputation, signal, impact, rank, and account info.",
-  {},
-  async () => {
-    try {
-      const profile = await getHackerProfile();
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(profile, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ── Tool: get_balance ─────────────────────────────────────────────
-server.tool(
-  "get_balance",
-  "Get your current unpaid bounty balance on HackerOne.",
-  {},
-  async () => {
-    try {
-      const balance = await getBalance();
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(balance, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
+// ── Write tools (only registered when H1_ALLOW_WRITES=true) ───────
+if (WRITES_ENABLED) {
 // ── Tool: submit_report ───────────────────────────────────────────
 server.tool(
   "submit_report",
@@ -576,10 +503,249 @@ server.tool(
   }
 );
 
+// ── End of write tools ────────────────────────────────────────────
+}
+
+// ── HAI draft tools (only registered when H1_ALLOW_DRAFTS=true) ───
+if (DRAFTS_ENABLED) {
+// ── Tool: create_report_draft ─────────────────────────────────────
+server.tool(
+  "create_report_draft",
+  "Create a draft report (report intent) reviewed by HAI, HackerOne's Report Assistant. Nothing is submitted to the program — the draft stays private to you. HAI analyzes the description and produces an improved title and write-up. Poll with get_report_draft until state is 'ready_to_submit'. Requires the program to have Report Assistant enabled. Attachments can be added with upload_draft_attachments; reference them in the description with {F<id>} (link) or !{F<id>} (embedded image).",
+  {
+    program_handle: z
+      .string()
+      .describe("Program handle for the draft (e.g. 'uber')"),
+    description: z
+      .string()
+      .describe(
+        "Everything you know about the vulnerability: summary, steps to reproduce, impact, PoC details. The more detail, the better HAI's draft."
+      ),
+  },
+  async ({ program_handle, description }) => {
+    try {
+      const result = await createReportIntent(program_handle, description);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: update_report_draft ─────────────────────────────────────
+server.tool(
+  "update_report_draft",
+  "Update a HAI report draft's (report intent) description in place. The draft keeps its ID; attachments and their {F<id>} references are preserved. HAI re-analyzes the new description asynchronously — poll the same draft ID with get_report_draft until state is 'ready_to_submit'. The title is re-generated by HAI. Only possible while the draft has not been submitted.",
+  {
+    draft_id: z.string().describe("The report intent (draft) ID"),
+    description: z
+      .string()
+      .describe("The new description — replaces the existing one entirely."),
+  },
+  async ({ draft_id, description }) => {
+    try {
+      const result = await updateReportIntent(draft_id, description);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: delete_report_draft ─────────────────────────────────────
+server.tool(
+  "delete_report_draft",
+  "Delete a HAI report draft (report intent) by ID. Irreversible; only possible while the draft has not been submitted. Use it to abandon drafts you no longer need.",
+  {
+    draft_id: z.string().describe("The report intent (draft) ID to delete"),
+  },
+  async ({ draft_id }) => {
+    try {
+      const result = await deleteReportIntent(draft_id);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: get_report_draft ────────────────────────────────────────
+server.tool(
+  "get_report_draft",
+  "Get a HAI report draft (report intent) by ID. Use this to poll after create_report_draft: check job_status_by_type until HAI's jobs finish and state becomes 'ready_to_submit'.",
+  {
+    draft_id: z.string().describe("The report intent (draft) ID"),
+  },
+  async ({ draft_id }) => {
+    try {
+      const result = await getReportIntent(draft_id);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: list_report_drafts ──────────────────────────────────────
+server.tool(
+  "list_report_drafts",
+  "List your HAI report drafts (report intents) with their state and HAI job statuses.",
+  {},
+  async () => {
+    try {
+      const results = await listReportIntents();
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(results, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: upload_draft_attachments ────────────────────────────────
+server.tool(
+  "upload_draft_attachments",
+  "Upload one or more files (screenshots, logs, PoC files) to a HAI report draft. The draft must not be submitted yet. Each returned attachment includes a markdown_reference ({F<id>}) to link it in text and a markdown_embed (!{F<id>}) to embed an image inline. Reference uploaded attachments in the draft description or in the eventual report body.",
+  {
+    draft_id: z.string().describe("The report intent (draft) ID"),
+    file_paths: z
+      .array(z.string())
+      .min(1)
+      .describe("Absolute paths of local files to upload (images, logs, etc.)"),
+  },
+  async ({ draft_id, file_paths }) => {
+    try {
+      const result = await uploadReportIntentAttachments(draft_id, file_paths);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: list_draft_attachments ──────────────────────────────────
+server.tool(
+  "list_draft_attachments",
+  "List all attachments on a HAI report draft, with their markdown reference ({F<id>}) and embed (!{F<id>}) syntax.",
+  {
+    draft_id: z.string().describe("The report intent (draft) ID"),
+  },
+  async ({ draft_id }) => {
+    try {
+      const result = await getReportIntentAttachments(draft_id);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: delete_draft_attachment ─────────────────────────────────
+server.tool(
+  "delete_draft_attachment",
+  "Delete an attachment from a HAI report draft. Irreversible; only possible while the draft has not been submitted.",
+  {
+    draft_id: z.string().describe("The report intent (draft) ID"),
+    attachment_id: z.string().describe("The attachment ID to delete"),
+  },
+  async ({ draft_id, attachment_id }) => {
+    try {
+      const result = await deleteReportIntentAttachment(
+        draft_id,
+        attachment_id
+      );
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+// ── End of HAI draft tools ────────────────────────────────────────
+}
+
 // ── Tool: search_disclosed_reports ────────────────────────────────
 server.tool(
   "search_disclosed_reports",
-  "Search publicly disclosed HackerOne reports (hacktivity). Useful for learning what gets paid, finding prior art, and understanding what a program considers valid.",
+  "Search publicly disclosed HackerOne reports (hacktivity). Useful for finding prior art and understanding what a program considers valid.",
   {
     program: z
       .string()
@@ -620,7 +786,11 @@ server.tool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("HackerOne MCP server running on stdio");
+  const mode = [
+    WRITES_ENABLED ? "writes ENABLED" : "read-only",
+    ...(DRAFTS_ENABLED ? ["HAI drafts ENABLED"] : []),
+  ].join(", ");
+  console.error(`HackerOne MCP server running on stdio (${mode})`);
 }
 
 main().catch((err) => {

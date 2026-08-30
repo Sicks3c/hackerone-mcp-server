@@ -1,7 +1,5 @@
-import fetch, { type RequestInit } from "node-fetch";
-import { type Readable } from "stream";
-
 const H1_BASE = "https://api.hackerone.com/v1";
+const FETCH_TIMEOUT_MS = 30_000; // abort stalled requests instead of hanging forever
 
 // ── Simple in-memory cache ────────────────────────────────────────
 interface CacheEntry {
@@ -69,6 +67,7 @@ async function h1Fetch(
     }
     try {
       const res = await fetch(url.toString(), {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         headers: {
           Authorization: `Basic ${getAuth()}`,
           Accept: "application/json",
@@ -95,7 +94,37 @@ async function h1Fetch(
       if (err.message?.includes("HackerOne API error")) throw err;
     }
   }
+  if (lastErr?.name === "AbortError") {
+    throw new Error(
+      `HackerOne API request timed out after ${FETCH_TIMEOUT_MS / 1000}s (retries exhausted)`
+    );
+  }
   throw lastErr ?? new Error("h1Fetch failed after retries");
+}
+
+// ── Write guard ───────────────────────────────────────────────────
+// The server is read-only by default. Set H1_ALLOW_WRITES=true to enable
+// submit_report, add_comment, and close_report.
+export const WRITES_ENABLED = process.env.H1_ALLOW_WRITES === "true";
+
+// Set H1_ALLOW_DRAFTS=true to enable HAI report drafts (report intents).
+// Drafts are private to the hacker and are never submitted to the program.
+export const DRAFTS_ENABLED = process.env.H1_ALLOW_DRAFTS === "true";
+
+function assertWritesEnabled(): void {
+  if (!WRITES_ENABLED) {
+    throw new Error(
+      "Write operations are disabled (read-only mode). Set H1_ALLOW_WRITES=true in the server environment to enable them."
+    );
+  }
+}
+
+function assertDraftsEnabled(): void {
+  if (!DRAFTS_ENABLED) {
+    throw new Error(
+      "HAI report drafts are disabled. Set H1_ALLOW_DRAFTS=true in the server environment to enable them."
+    );
+  }
 }
 
 async function h1Post(
@@ -103,6 +132,13 @@ async function h1Post(
   body: any,
   contentType = "application/json"
 ): Promise<any> {
+  assertWritesEnabled();
+  return h1PostRaw(path, body, contentType);
+}
+
+// Multipart POST used for file uploads (report intent attachments).
+// Content-Type is left to fetch so the multipart boundary is set.
+async function h1PostFormData(path: string, form: FormData): Promise<any> {
   const url = `${H1_BASE}${path}`;
 
   let lastErr: Error | null = null;
@@ -111,6 +147,75 @@ async function h1Post(
     try {
       const res = await fetch(url, {
         method: "POST",
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        headers: {
+          Authorization: `Basic ${getAuth()}`,
+          Accept: "application/json",
+        },
+        body: form,
+      });
+
+      if (res.status === 429) {
+        const retryAfter = res.headers.get("retry-after");
+        await sleep(retryAfter ? parseInt(retryAfter, 10) * 1000 : 5000);
+        continue;
+      }
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`HackerOne API error ${res.status}: ${text}`);
+      }
+
+      const text = await res.text();
+      return text ? JSON.parse(text) : {};
+    } catch (err: any) {
+      lastErr = err;
+      if (err.message?.includes("HackerOne API error")) throw err;
+    }
+  }
+  throw lastErr ?? new Error("h1PostFormData failed after retries");
+}
+
+async function h1Delete(path: string): Promise<any> {
+  const url = `${H1_BASE}${path}`;
+  const res = await fetch(url, {
+    method: "DELETE",
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    headers: {
+      Authorization: `Basic ${getAuth()}`,
+      Accept: "application/json",
+    },
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HackerOne API error ${res.status}: ${text}`);
+  }
+
+  const text = await res.text();
+  return text ? JSON.parse(text) : {};
+}
+
+// JSON PATCH with the same retry/429/backoff behavior as h1PostRaw.
+async function h1Patch(path: string, body: any): Promise<any> {
+  return h1PostRaw(path, body, "application/json", "PATCH");
+}
+
+async function h1PostRaw(
+  path: string,
+  body: any,
+  contentType = "application/json",
+  method = "POST"
+): Promise<any> {
+  const url = `${H1_BASE}${path}`;
+
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(1000 * Math.pow(2, attempt));
+    try {
+      const res = await fetch(url, {
+        method,
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         headers: {
           Authorization: `Basic ${getAuth()}`,
           Accept: "application/json",
@@ -140,6 +245,11 @@ async function h1Post(
       lastErr = err;
       if (err.message?.includes("HackerOne API error")) throw err;
     }
+  }
+  if (lastErr?.name === "AbortError") {
+    throw new Error(
+      `HackerOne API request timed out after ${FETCH_TIMEOUT_MS / 1000}s (retries exhausted)`
+    );
   }
   throw lastErr ?? new Error("h1Post failed after retries");
 }
@@ -323,7 +433,6 @@ export async function searchReports(opts: SearchReportsOpts = {}) {
 }
 
 function mapReportSummary(r: any) {
-  const bounty = r.relationships?.bounties?.data?.[0]?.attributes;
   return {
     id: r.id,
     title: r.attributes.title,
@@ -332,22 +441,18 @@ function mapReportSummary(r: any) {
     severity: r.attributes.severity_rating,
     created_at: r.attributes.created_at,
     disclosed_at: r.attributes.disclosed_at,
-    bounty_awarded_at: r.attributes.bounty_awarded_at,
-    bounty_amount: bounty?.amount ?? null,
-    bounty_bonus: bounty?.bonus_amount ?? null,
     _vuln_info: r.attributes.vulnerability_information,
     weakness: r.relationships?.weakness?.data?.attributes?.name ?? null,
     program: r.relationships?.program?.data?.attributes?.handle ?? null,
   };
 }
 
-// ── Get single report (with full CVSS + bounty) ──────────────────
+// ── Get single report (with full CVSS) ───────────────────────────
 export async function getReport(reportId: string) {
   const data = await h1Fetch(`/hackers/reports/${reportId}`);
   const r = data.data;
   const attrs = r.attributes;
   const sev = r.relationships?.severity?.data?.attributes;
-  const bounty = r.relationships?.bounties?.data?.[0]?.attributes;
   const attachments = r.relationships?.attachments?.data ?? [];
 
   return {
@@ -357,7 +462,6 @@ export async function getReport(reportId: string) {
     created_at: attrs.created_at,
     closed_at: attrs.closed_at,
     triaged_at: attrs.triaged_at,
-    bounty_awarded_at: attrs.bounty_awarded_at,
     disclosed_at: attrs.disclosed_at,
     severity: sev?.rating ?? null,
     cvss_score: sev?.score ?? null,
@@ -373,8 +477,6 @@ export async function getReport(reportId: string) {
           availability: sev.availability,
         }
       : null,
-    bounty_amount: bounty?.amount ?? null,
-    bounty_bonus: bounty?.bonus_amount ?? null,
     vulnerability_information: attrs.vulnerability_information,
     impact: attrs.impact,
     weakness: r.relationships?.weakness?.data?.attributes?.name ?? null,
@@ -506,58 +608,6 @@ export async function getProgramWeaknesses(handle: string, pageSize = 100) {
     return weaknesses.slice(0, pageSize);
   }
   return weaknesses;
-}
-
-// ── Get earnings ──────────────────────────────────────────────────
-export async function getEarnings(pageSize = 100) {
-  const data = await h1Fetch("/hackers/payments/earnings", {
-    "page[size]": String(pageSize),
-  });
-
-  return data.data.map((e: any) => ({
-    id: e.id,
-    amount: e.attributes.amount,
-    awarded_by: e.attributes.awarded_by_name,
-    created_at: e.attributes.created_at,
-    currency:
-      e.relationships?.program?.data?.attributes?.currency ?? null,
-    program: e.relationships?.program?.data?.attributes?.handle ?? null,
-  }));
-}
-
-// ── Get hacker profile ────────────────────────────────────────────
-export async function getHackerProfile() {
-  const data = await h1Fetch("/hackers/me");
-  const u = data.data;
-  const attrs = u.attributes;
-
-  return {
-    id: u.id,
-    username: attrs.username,
-    name: attrs.name,
-    bio: attrs.bio,
-    reputation: attrs.reputation,
-    signal: attrs.signal,
-    impact: attrs.impact,
-    rank: attrs.rank,
-    created_at: attrs.created_at,
-    hackerone_triager: attrs.hackerone_triager,
-  };
-}
-
-// ── Get balance ───────────────────────────────────────────────────
-export async function getBalance() {
-  const data = await h1Fetch("/hackers/payments/balance");
-  // The balance endpoint may return differently; handle both formats
-  if (data.data) {
-    const attrs = data.data.attributes ?? data.data;
-    return {
-      balance: attrs.balance ?? attrs.amount ?? null,
-      currency: attrs.currency ?? null,
-      pending: attrs.pending ?? null,
-    };
-  }
-  return data;
 }
 
 // ── Get report summary (condensed for Claude context) ──────────────
@@ -699,6 +749,176 @@ export async function closeReport(reportId: string, message?: string) {
   };
 }
 
+// ── HAI report drafts (report intents) ────────────────────────────
+// Report intents are drafts processed by HAI (Report Assistant). They are
+// private to the hacker and never submitted to the program via these calls.
+function mapReportIntent(r: any) {
+  const a = r.attributes ?? {};
+  return {
+    id: r.id,
+    title: a.title,
+    state: a.state,
+    description: a.description,
+    has_failing_jobs: a.has_failing_jobs,
+    has_canceled_jobs: a.has_canceled_jobs,
+    job_status_by_type: a.job_status_by_type,
+    metadata: a.metadata,
+  };
+}
+
+export async function createReportIntent(
+  teamHandle: string,
+  description: string
+) {
+  assertDraftsEnabled();
+  const body = {
+    data: {
+      type: "report-intent",
+      attributes: {
+        team_handle: teamHandle,
+        description,
+      },
+    },
+  };
+
+  const result = await h1PostRaw("/hackers/report_intents", body);
+  return mapReportIntent(result.data);
+}
+
+export async function deleteReportIntent(id: string) {
+  assertDraftsEnabled();
+  await h1Delete(`/hackers/report_intents/${id}`);
+  return { deleted_draft_id: id };
+}
+
+// Update a draft's description in place via the API's PATCH endpoint. The
+// same intent (same ID) is updated, so attachments and their {F<id>}
+// references survive untouched. PATCH re-triggers HAI on the new description,
+// which is exactly the desired behavior; the call returns immediately — HAI
+// jobs run asynchronously and can take minutes, so waiting inside the tool
+// would block the caller. Poll get_report_draft on the same ID until state is
+// "ready_to_submit". The title is re-generated by HAI.
+export async function updateReportIntent(id: string, description: string) {
+  assertDraftsEnabled();
+
+  const body = {
+    data: {
+      type: "report-intent",
+      attributes: { description },
+    },
+  };
+  const result = await h1Patch(`/hackers/report_intents/${id}`, body);
+
+  return {
+    ...mapReportIntent(result.data),
+    note: `Draft ${id} updated in place (attachments and {F<id>} references are preserved). HAI re-analysis runs asynchronously — poll get_report_draft on this ID until state is ready_to_submit.`,
+  };
+}
+
+export async function getReportIntent(id: string) {
+  const data = await h1Fetch(`/hackers/report_intents/${id}`, undefined, {
+    skipCache: true, // used for polling HAI job progress
+  });
+  return mapReportIntent(data.data);
+}
+
+export async function listReportIntents() {
+  const allData = await h1FetchAllPages("/hackers/report_intents");
+  return allData.map(mapReportIntent);
+}
+
+// ── Report intent attachments ─────────────────────────────────────
+// Attachments can only be uploaded to report intents (drafts) via the
+// hacker API — not to submitted reports or comments. Once uploaded, an
+// attachment can be referenced in markdown text (description, and later
+// the submitted report) with {F<id>} as a link or !{F<id>} to embed an
+// image inline.
+function mapAttachment(a: any) {
+  return {
+    id: a.id,
+    file_name: a.attributes?.file_name,
+    content_type: a.attributes?.content_type,
+    file_size: a.attributes?.file_size,
+    expiring_url: a.attributes?.expiring_url,
+    markdown_reference: `{F${a.id}}`,
+    markdown_embed: `!{F${a.id}}`,
+  };
+}
+
+const MIME_BY_EXT: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  ".pdf": "application/pdf",
+  ".txt": "text/plain",
+  ".log": "text/plain",
+  ".md": "text/markdown",
+  ".json": "application/json",
+  ".html": "text/html",
+  ".zip": "application/zip",
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+};
+
+export async function uploadReportIntentAttachments(
+  intentId: string,
+  filePaths: string[]
+) {
+  assertDraftsEnabled();
+  if (!filePaths.length) {
+    throw new Error("No file paths provided");
+  }
+
+  const { readFile } = await import("fs/promises");
+  const { basename, extname } = await import("path");
+
+  const form = new FormData();
+  for (const filePath of filePaths) {
+    const data = await readFile(filePath);
+    const fileName = basename(filePath);
+    const mime =
+      MIME_BY_EXT[extname(fileName).toLowerCase()] ??
+      "application/octet-stream";
+    form.append("files[]", new Blob([data], { type: mime }), fileName);
+  }
+
+  const result = await h1PostFormData(
+    `/hackers/report_intents/${intentId}/attachments`,
+    form
+  );
+  const uploaded = Array.isArray(result.data) ? result.data : [result.data];
+  return {
+    report_intent_id: intentId,
+    attachments: uploaded.filter(Boolean).map(mapAttachment),
+  };
+}
+
+export async function getReportIntentAttachments(intentId: string) {
+  const data = await h1Fetch(
+    `/hackers/report_intents/${intentId}/attachments`,
+    undefined,
+    { skipCache: true }
+  );
+  return (data.data ?? []).map(mapAttachment);
+}
+
+export async function deleteReportIntentAttachment(
+  intentId: string,
+  attachmentId: string
+) {
+  assertDraftsEnabled();
+  const result = await h1Delete(
+    `/hackers/report_intents/${intentId}/attachments/${attachmentId}`
+  );
+  return {
+    deleted_attachment_id: attachmentId,
+    remaining_attachments: (result.data ?? []).map(mapAttachment),
+  };
+}
+
 // ── Search disclosed reports ──────────────────────────────────────
 export async function searchDisclosedReports(opts: {
   program?: string;
@@ -721,7 +941,6 @@ export async function searchDisclosedReports(opts: {
     title: r.attributes?.title ?? r.attributes?.raw_title,
     severity: r.attributes?.severity_rating,
     disclosed_at: r.attributes?.disclosed_at,
-    total_awarded_amount: r.attributes?.total_awarded_amount,
     upvotes: r.attributes?.vote_count ?? r.attributes?.upvotes,
     url: r.attributes?.url ?? `https://hackerone.com/reports/${r.id}`,
     reporter:

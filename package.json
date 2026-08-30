@@ -1,6 +1,6 @@
 {
   "name": "hackerone-mcp-server",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "MCP server for accessing HackerOne reports in Claude Code",
   "type": "module",
   "main": "dist/index.js",

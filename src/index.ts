@@ -29,7 +29,7 @@ import {
 
 const server = new McpServer({
   name: "hackerone",
-  version: "3.0.0",
+  version: "3.0.1",
 });
 
 // ── Tool: search_reports ───────────────────────────────────────────

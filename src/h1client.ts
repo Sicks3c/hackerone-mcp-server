@@ -70,6 +70,7 @@ async function h1Fetch(
     }
     try {
       const res = await fetch(url.toString(), {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         headers: {
           Authorization: `Basic ${getAuth()}`,
           Accept: "application/json",
@@ -95,6 +96,11 @@ async function h1Fetch(
       lastErr = err;
       if (err.message?.includes("HackerOne API error")) throw err;
     }
+  }
+  if (lastErr?.name === "AbortError") {
+    throw new Error(
+      `HackerOne API request timed out after ${FETCH_TIMEOUT_MS / 1000}s (retries exhausted)`
+    );
   }
   throw lastErr ?? new Error("h1Fetch failed after retries");
 }
@@ -144,6 +150,7 @@ async function h1PostFormData(path: string, form: FormData): Promise<any> {
     try {
       const res = await fetch(url, {
         method: "POST",
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         headers: {
           Authorization: `Basic ${getAuth()}`,
           Accept: "application/json",
@@ -176,6 +183,7 @@ async function h1Delete(path: string): Promise<any> {
   const url = `${H1_BASE}${path}`;
   const res = await fetch(url, {
     method: "DELETE",
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     headers: {
       Authorization: `Basic ${getAuth()}`,
       Accept: "application/json",

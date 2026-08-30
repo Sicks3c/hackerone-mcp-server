@@ -803,16 +803,14 @@ async function resolveProgramHandle(programId: string): Promise<string> {
   return handle;
 }
 
-const DRAFT_REPLACE_POLL_INTERVAL_MS = 5_000;
-const DRAFT_REPLACE_TIMEOUT_MS = 240_000; // HAI jobs can take a few minutes
-
 // "Updating" a draft replaces it: the API's PATCH re-triggers HAI on the same
-// intent, so instead we fetch the old draft, create a new one with the new
-// description for the same program, wait until HAI finishes
-// (state == "ready_to_submit"), and only then delete the old draft. If the new
-// draft is not ready in time, the old draft is kept and both IDs are returned.
-// Attachments on the old draft are NOT carried over — re-upload them to the
-// new draft and update any {F<id>} references.
+// intent, so instead we fetch the old draft and create a new one with the new
+// description for the same program. The call returns immediately — HAI jobs
+// run asynchronously and can take minutes, so waiting inside the tool would
+// block the caller. The old draft is kept; once the new draft reaches
+// "ready_to_submit" (poll get_report_draft), delete the old one with
+// delete_report_draft. Attachments on the old draft are NOT carried over —
+// re-upload them to the new draft and update any {F<id>} references.
 export async function updateReportIntent(id: string, description: string) {
   assertDraftsEnabled();
 
@@ -829,28 +827,11 @@ export async function updateReportIntent(id: string, description: string) {
 
   const created = await createReportIntent(teamHandle, description);
 
-  const deadline = Date.now() + DRAFT_REPLACE_TIMEOUT_MS;
-  let current = created;
-  while (current.state !== "ready_to_submit" && Date.now() < deadline) {
-    if (current.has_failing_jobs) break;
-    await sleep(DRAFT_REPLACE_POLL_INTERVAL_MS);
-    current = await getReportIntent(created.id);
-  }
-
-  if (current.state !== "ready_to_submit") {
-    return {
-      ...current,
-      old_draft_id: id,
-      old_draft_deleted: false,
-      note: `New draft ${created.id} is not ready_to_submit yet (state: ${current.state}); old draft ${id} was kept. Poll get_report_draft on the new ID until it is ready.`,
-    };
-  }
-
-  await deleteReportIntent(id);
   return {
-    ...current,
-    replaced_draft_id: id,
-    old_draft_deleted: true,
+    ...created,
+    old_draft_id: id,
+    old_draft_deleted: false,
+    note: `New draft ${created.id} created (state: ${created.state}); old draft ${id} was kept. Poll get_report_draft on the new ID until it is ready_to_submit, then delete the old draft with delete_report_draft.`,
   };
 }
 

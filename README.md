@@ -51,7 +51,7 @@ Or add manually to `~/.claude.json`:
 ```bash
 claude
 > /mcp
-# You should see "hackerone" listed with 10 tools (+3 writes, +7 HAI drafts)
+# You should see "hackerone" listed with 10 tools (+3 writes, +8 HAI drafts)
 ```
 
 ## Enabling write operations
@@ -69,7 +69,7 @@ claude mcp add hackerone \
 
 ## Enabling HAI report drafts
 
-To let HAI (HackerOne's Report Assistant) review draft reports, set `H1_ALLOW_DRAFTS=true`. This enables the `create_report_draft`, `update_report_draft`, `get_report_draft`, `list_report_drafts`, `upload_draft_attachments`, `list_draft_attachments`, and `delete_draft_attachment` tools. Drafts (report intents) are private to you — they are never submitted to the program by these tools, and the program must have Report Assistant enabled:
+To let HAI (HackerOne's Report Assistant) review draft reports, set `H1_ALLOW_DRAFTS=true`. This enables the `create_report_draft`, `update_report_draft`, `delete_report_draft`, `get_report_draft`, `list_report_drafts`, `upload_draft_attachments`, `list_draft_attachments`, and `delete_draft_attachment` tools. Drafts (report intents) are private to you — they are never submitted to the program by these tools, and the program must have Report Assistant enabled:
 
 ```bash
 claude mcp add hackerone \
@@ -110,7 +110,8 @@ claude mcp add hackerone \
 | Tool | Description |
 |------|-------------|
 | `create_report_draft` | Create a draft report (report intent) for HAI to review — never submitted to the program |
-| `update_report_draft` | Replace a draft with a new one carrying the new description; deletes the old draft once the new one is `ready_to_submit` (attachments are not carried over) |
+| `update_report_draft` | Replace a draft with a new one carrying the new description; returns immediately with the new ID — the old draft is kept, delete it with `delete_report_draft` once the new one is `ready_to_submit` (attachments are not carried over) |
+| `delete_report_draft` | Delete a draft by ID (only before submission) |
 | `get_report_draft` | Get a draft by ID; poll until HAI's jobs finish and state is `ready_to_submit` |
 | `list_report_drafts` | List your HAI report drafts and their states |
 | `upload_draft_attachments` | Upload files (screenshots, logs, PoC) to a draft; returns `{F<id>}` link and `!{F<id>}` embed syntax |

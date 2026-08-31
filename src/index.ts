@@ -2,741 +2,376 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
-import {
-  searchReports,
-  getReport,
-  getReportActivities,
-  getReportSummary,
-  listPrograms,
-  getProgramDetails,
-  getProgramScope,
-  getProgramWeaknesses,
-  getEarnings,
-  getHackerProfile,
-  getBalance,
-  submitReport,
-  addComment,
-  closeReport,
-  searchDisclosedReports,
-  createReportIntent,
-  listReportIntents,
-  getReportIntent,
-  updateReportIntent,
-  deleteReportIntent,
-  submitReportIntent,
-} from "./h1client.js";
+import { z, type ZodRawShape } from "zod";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import * as h1 from "./h1client.js";
 
-const server = new McpServer({
-  name: "hackerone",
-  version: "2.0.0",
-});
+const server = new McpServer({ name: "hackerone", version: "3.0.0" });
 
-// ── Tool: search_reports ───────────────────────────────────────────
-server.tool(
+// The SDK types the callback's args from the schema shape, which TypeScript
+// cannot resolve through a generic wrapper. Args are validated by the schema
+// at runtime regardless, so bind one concrete signature here.
+type RegisterTool = (
+  name: string,
+  description: string,
+  schema: ZodRawShape,
+  cb: (params: any) => Promise<CallToolResult>
+) => void;
+
+const register = server.tool.bind(server) as unknown as RegisterTool;
+
+// Every tool serialises its result the same way and reports failures as
+// tool errors rather than throwing out of the server.
+function tool(
+  name: string,
+  description: string,
+  schema: ZodRawShape,
+  handler: (params: any) => Promise<unknown>
+): void {
+  register(name, description, schema, async (params: any): Promise<CallToolResult> => {
+    try {
+      const result = await handler(params);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        isError: false,
+      };
+    } catch (err: any) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  });
+}
+
+const severity = z.enum(["none", "low", "medium", "high", "critical"]);
+const programHandle = z.string().describe("Program handle (e.g. 'uber', 'github')");
+
+// ══ Reports ═══════════════════════════════════════════════════════
+tool(
   "search_reports",
-  "Search and list your HackerOne reports. Filter by keyword, program, severity, or state. Great for finding past reports to reference when drafting new ones.",
+  "Search and list your HackerOne reports. Filter by keyword, program, severity, or state. " +
+    "Note: HackerOne's report list endpoint ignores server-side filters, so any filter here " +
+    "paginates your full report history and filters locally — slower, but actually correct.",
   {
-    query: z
-      .string()
-      .optional()
-      .describe(
-        "Keyword search (e.g. 'SSRF', 'OAuth', 'PassRole', 'S3')"
-      ),
-    program: z
-      .string()
-      .optional()
-      .describe("Program handle to filter by (e.g. 'uber', 'amazon')"),
-    severity: z
-      .enum(["none", "low", "medium", "high", "critical"])
-      .optional()
-      .describe("Filter by severity rating"),
+    query: z.string().optional().describe("Keyword matched against title, vulnerability info, and asset"),
+    program: z.string().optional().describe("Program handle to filter by"),
+    severity: severity.optional().describe("Filter by severity rating"),
     state: z
-      .enum([
-        "new",
-        "triaged",
-        "needs-more-info",
-        "resolved",
-        "not-applicable",
-        "informative",
-        "duplicate",
-        "spam",
-      ])
+      .enum(["new", "triaged", "needs-more-info", "resolved", "not-applicable", "informative", "duplicate", "spam"])
       .optional()
       .describe("Filter by report state"),
-    page_size: z
-      .number()
-      .min(1)
-      .max(100)
-      .optional()
-      .describe("Results per page (default 25)"),
-    page_number: z.number().optional().describe("Page number for pagination"),
-    sort: z
-      .string()
-      .optional()
-      .describe(
-        "Sort field (e.g. 'reports.created_at' or '-reports.created_at' for desc)"
-      ),
+    page_size: z.number().min(1).max(100).optional().describe("Results to return (default 25)"),
+    page_number: z.number().optional().describe("Page number; only used when no filter is set"),
+    sort: z.string().optional().describe("Sort field, e.g. '-created_at' for newest first"),
+    max_pages: z.number().min(1).max(50).optional().describe("Cap pages scanned when filtering (default 20)"),
   },
-  async (params) => {
-    try {
-      const results = await searchReports(params);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(results, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
+  (p) => h1.searchReports(p)
 );
 
-// ── Tool: get_report ───────────────────────────────────────────────
-server.tool(
+tool(
   "get_report",
-  "Get the full details of a specific HackerOne report by ID. Returns title, vulnerability details, impact, severity, full CVSS vector/score, bounty amounts, attachments, timestamps, and program info.",
-  {
-    report_id: z.string().describe("The HackerOne report ID"),
-  },
-  async ({ report_id }) => {
-    try {
-      const report = await getReport(report_id);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(report, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
+  "Get full details of a HackerOne report: vulnerability info, impact, severity, CVSS vector, bounty, attachments, and program.",
+  { report_id: z.string().describe("The HackerOne report ID") },
+  ({ report_id }) => h1.getReport(report_id)
 );
 
-// ── Tool: get_report_with_conversation ─────────────────────────────
-server.tool(
+tool(
   "get_report_with_conversation",
-  "Get a report with its full triage conversation. Useful for understanding what questions triage asked, how you responded, and what led to resolution. Great for learning what works.",
-  {
-    report_id: z.string().describe("The HackerOne report ID"),
-  },
-  async ({ report_id }) => {
-    try {
-      const summary = await getReportSummary(report_id);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(summary, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
+  "Get a report plus its full triage conversation — what triage asked, how you answered, and what led to resolution.",
+  { report_id: z.string().describe("The HackerOne report ID") },
+  ({ report_id }) => h1.getReportSummary(report_id)
 );
 
-// ── Tool: get_report_activities ────────────────────────────────────
-server.tool(
+tool(
   "get_report_activities",
-  "Get the activity timeline of a report: comments, state changes, bounty awards, and triage responses.",
+  "Get a report's activity timeline: comments, state changes, bounty awards, and triage responses.",
   {
     report_id: z.string().describe("The HackerOne report ID"),
-    page_size: z
-      .number()
-      .min(1)
-      .max(100)
-      .optional()
-      .describe("Number of activities to return (default 50)"),
+    page_size: z.number().min(1).max(100).optional(),
   },
-  async ({ report_id, page_size }) => {
-    try {
-      const activities = await getReportActivities(report_id, page_size);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(activities, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
+  ({ report_id, page_size }) => h1.getReportActivities(report_id, page_size)
 );
 
-// ── Tool: list_programs ────────────────────────────────────────────
-server.tool(
-  "list_programs",
-  "List bug bounty programs you have access to on HackerOne. Auto-paginates to return all programs.",
-  {
-    page_size: z
-      .number()
-      .min(1)
-      .max(1000)
-      .optional()
-      .describe("Max programs to return (default: all)"),
-  },
-  async ({ page_size }) => {
-    try {
-      const programs = await listPrograms(page_size);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(programs, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ── Tool: get_program_details ──────────────────────────────────────
-server.tool(
-  "get_program_details",
-  "Get detailed info about a single program: policy, response times, metrics, bounty splitting, and submission state.",
-  {
-    program_handle: z
-      .string()
-      .describe("Program handle (e.g. 'uber', 'github')"),
-  },
-  async ({ program_handle }) => {
-    try {
-      const details = await getProgramDetails(program_handle);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(details, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ── Tool: analyze_report_patterns ──────────────────────────────────
-server.tool(
+tool(
   "analyze_report_patterns",
-  "Fetch your recent reports and analyze patterns: most common vulnerability types, severity distribution, resolution rates, and programs. Useful for understanding your hunting profile.",
+  "Analyse your recent reports: severity distribution, states, top programs and assets. " +
+    "Weakness types require one extra request per report, so they are opt-in.",
   {
-    page_size: z
-      .number()
-      .min(10)
-      .max(100)
+    page_size: z.number().min(10).max(100).optional().describe("Reports to analyse (default 100)"),
+    include_weaknesses: z
+      .boolean()
       .optional()
-      .describe("Number of reports to analyze (default 100)"),
+      .describe("Fetch each report individually to tally CWE types (slow)"),
   },
-  async ({ page_size }) => {
-    try {
-      const reports = await searchReports({
-        page_size: page_size ?? 100,
-        sort: "-reports.created_at",
-      });
-
-      const severityCounts: Record<string, number> = {};
-      const stateCounts: Record<string, number> = {};
-      const programCounts: Record<string, number> = {};
-      const weaknessCounts: Record<string, number> = {};
-
-      for (const r of reports) {
-        severityCounts[r.severity ?? "unknown"] =
-          (severityCounts[r.severity ?? "unknown"] ?? 0) + 1;
-        stateCounts[r.state ?? "unknown"] =
-          (stateCounts[r.state ?? "unknown"] ?? 0) + 1;
-        if (r.program)
-          programCounts[r.program] = (programCounts[r.program] ?? 0) + 1;
-        if (r.weakness)
-          weaknessCounts[r.weakness] = (weaknessCounts[r.weakness] ?? 0) + 1;
-      }
-
-      const analysis = {
-        total_reports_analyzed: reports.length,
-        severity_distribution: severityCounts,
-        state_distribution: stateCounts,
-        top_programs: Object.entries(programCounts)
-          .sort(([, a], [, b]) => b - a)
-          .slice(0, 10)
-          .map(([prog, count]) => ({ program: prog, count })),
-        top_weakness_types: Object.entries(weaknessCounts)
-          .sort(([, a], [, b]) => b - a)
-          .slice(0, 10)
-          .map(([weakness, count]) => ({ weakness, count })),
-      };
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(analysis, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
+  (p) => h1.analyzeReportPatterns(p)
 );
 
-// ── Tool: get_program_scope ──────────────────────────────────────
-server.tool(
+// ══ Programs ══════════════════════════════════════════════════════
+tool(
+  "list_programs",
+  "List bug bounty programs you have access to. Auto-paginates.",
+  { page_size: z.number().min(1).max(1000).optional().describe("Max to return (default: all)") },
+  ({ page_size }) => h1.listPrograms(page_size)
+);
+
+tool(
+  "get_program_details",
+  "Get a program's policy, response metrics, submission state, and bounty splitting settings.",
+  { program_handle: programHandle },
+  ({ program_handle }) => h1.getProgramDetails(program_handle)
+);
+
+tool(
   "get_program_scope",
-  "Get the in-scope assets for a bug bounty program. Auto-paginates to return all scope items. Returns asset types, identifiers, bounty eligibility, and severity caps.",
+  "Get a program's in-scope assets: types, identifiers, bounty eligibility, and severity caps. Auto-paginates.",
   {
-    program_handle: z
-      .string()
-      .describe("Program handle (e.g. 'uber', 'ipc-h1c-aws-tokyo-2026')"),
-    page_size: z
-      .number()
-      .min(1)
-      .max(1000)
-      .optional()
-      .describe("Max scope items to return (default: all)"),
+    program_handle: programHandle,
+    page_size: z.number().min(1).max(1000).optional().describe("Max to return (default: all)"),
   },
-  async ({ program_handle, page_size }) => {
-    try {
-      const scope = await getProgramScope(program_handle, page_size);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(scope, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
+  ({ program_handle, page_size }) => h1.getProgramScope(program_handle, page_size)
 );
 
-// ── Tool: get_program_weaknesses ────────────────────────────────
-server.tool(
+tool(
+  "get_scope_changes",
+  "List scope assets added or changed since a date — server-side filtered. Use this to spot newly in-scope attack surface.",
+  {
+    program_handle: programHandle,
+    since: z.string().describe("ISO-8601 date, e.g. '2026-01-01' or '2026-01-01T00:00:00+00:00'"),
+    field: z
+      .enum(["updated_at", "created_at"])
+      .optional()
+      .describe("Compare against last update (default) or original creation"),
+  },
+  ({ program_handle, since, field }) => h1.getScopeChanges(program_handle, since, field)
+);
+
+tool(
   "get_program_weaknesses",
-  "Get the accepted vulnerability/weakness types for a program. Auto-paginates. Helps frame reports using the right CWE categories the program cares about.",
+  "Get the weakness/CWE types a program accepts. Auto-paginates. Use the returned id as weakness_id when drafting.",
   {
-    program_handle: z
-      .string()
-      .describe("Program handle (e.g. 'uber', 'ipc-h1c-aws-tokyo-2026')"),
-    page_size: z
-      .number()
-      .min(1)
-      .max(1000)
-      .optional()
-      .describe("Max weaknesses to return (default: all)"),
+    program_handle: programHandle,
+    page_size: z.number().min(1).max(1000).optional(),
   },
-  async ({ program_handle, page_size }) => {
-    try {
-      const weaknesses = await getProgramWeaknesses(program_handle, page_size);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(weaknesses, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
+  ({ program_handle, page_size }) => h1.getProgramWeaknesses(program_handle, page_size)
 );
 
-// ── Tool: get_earnings ──────────────────────────────────────────
-server.tool(
-  "get_earnings",
-  "Get your bounty earnings history. Shows amounts, currency, dates, and which programs paid out.",
-  {
-    page_size: z
-      .number()
-      .min(1)
-      .max(100)
-      .optional()
-      .describe("Number of earnings to return (default 100)"),
-  },
-  async ({ page_size }) => {
-    try {
-      const earnings = await getEarnings(page_size);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(earnings, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
+tool(
+  "get_scope_exclusions",
+  "Get report categories a program excludes from rewards, beyond the standard ineligible findings. Check before investing time in a finding.",
+  { program_handle: programHandle },
+  ({ program_handle }) => h1.getScopeExclusions(program_handle)
 );
 
-// ── Tool: get_hacker_profile ──────────────────────────────────────
-server.tool(
-  "get_hacker_profile",
-  "Get your HackerOne hacker profile: reputation, signal, impact, rank, and account info.",
-  {},
-  async () => {
-    try {
-      const profile = await getHackerProfile();
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(profile, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ── Tool: get_balance ─────────────────────────────────────────────
-server.tool(
-  "get_balance",
-  "Get your current unpaid bounty balance on HackerOne.",
-  {},
-  async () => {
-    try {
-      const balance = await getBalance();
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(balance, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ── Tool: submit_report ───────────────────────────────────────────
-server.tool(
-  "submit_report",
-  "Submit a new vulnerability report to a HackerOne program. Returns the new report ID and URL. Use get_program_scope and get_program_weaknesses first to get the right scope/weakness IDs.",
-  {
-    program_handle: z
-      .string()
-      .describe("Program handle to submit to (e.g. 'uber')"),
-    title: z.string().describe("Report title"),
-    vulnerability_information: z
-      .string()
-      .describe(
-        "Full vulnerability details in markdown — steps to reproduce, root cause, and proof of concept"
-      ),
-    impact: z
-      .string()
-      .optional()
-      .describe("Impact statement — what an attacker can achieve"),
-    severity_rating: z
-      .enum(["none", "low", "medium", "high", "critical"])
-      .optional()
-      .describe("Suggested severity rating"),
-    weakness_id: z
-      .string()
-      .optional()
-      .describe(
-        "Weakness/CWE ID from get_program_weaknesses (the numeric id field)"
-      ),
-    structured_scope_id: z
-      .string()
-      .optional()
-      .describe(
-        "Scope asset ID from get_program_scope (the numeric id field)"
-      ),
-    draft: z
-      .boolean()
-      .optional()
-      .describe(
-        "Intended to save as draft (state: pending) — NOTE: H1 API currently ignores this and submits directly. Use web UI for true draft behavior."
-      ),
-  },
-  async (params) => {
-    try {
-      const result = await submitReport(params);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ── Tool: add_comment ─────────────────────────────────────────────
-server.tool(
-  "add_comment",
-  "Add a comment to an existing HackerOne report. Use this to respond to triage questions or provide additional information.",
-  {
-    report_id: z.string().describe("The HackerOne report ID"),
-    message: z.string().describe("Comment text (supports markdown)"),
-    internal: z
-      .boolean()
-      .optional()
-      .describe("If true, comment is only visible to the team (default false)"),
-  },
-  async ({ report_id, message, internal }) => {
-    try {
-      const result = await addComment(report_id, message, internal ?? false);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ── Tool: close_report ────────────────────────────────────────────
-server.tool(
-  "close_report",
-  "Withdraw/close one of your own HackerOne reports. Sends a close request with an optional message.",
-  {
-    report_id: z.string().describe("The HackerOne report ID to close"),
-    message: z
-      .string()
-      .optional()
-      .describe("Reason for closing (default: 'Withdrawing this report.')"),
-  },
-  async ({ report_id, message }) => {
-    try {
-      const result = await closeReport(report_id, message);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ── Tool: search_disclosed_reports ────────────────────────────────
-server.tool(
+// ══ Hacktivity ════════════════════════════════════════════════════
+tool(
   "search_disclosed_reports",
-  "Search publicly disclosed HackerOne reports (hacktivity). Useful for learning what gets paid, finding prior art, and understanding what a program considers valid.",
+  "Search publicly disclosed reports (hacktivity) using HackerOne's Lucene query engine. " +
+    "Useful for prior art, seeing what a program pays for, and calibrating severity.",
   {
-    program: z
-      .string()
-      .optional()
-      .describe("Program handle to filter by (e.g. 'uber')"),
+    program: z.string().optional().describe("Program handle, e.g. 'stripe'"),
     query: z
       .string()
       .optional()
-      .describe("Keyword to filter results (e.g. 'SSRF', 'IDOR')"),
-    page_size: z
-      .number()
-      .min(1)
-      .max(100)
+      .describe("Free text, or raw Lucene (e.g. 'SSRF AND cve_ids:CVE-2024-1234')"),
+    severity: severity.optional().describe("Filter by severity rating"),
+    substate: z
+      .enum(["resolved", "informative", "duplicate", "not-applicable", "spam"])
       .optional()
-      .describe("Number of results (default 25)"),
+      .describe("Filter by final report state"),
+    reporter: z.string().optional().describe("Filter by reporter username"),
+    min_bounty: z.number().optional().describe("Only reports awarding more than this amount"),
+    disclosed_only: z.boolean().optional().describe("Exclude undisclosed activity entries"),
+    sort: z
+      .enum([
+        "-latest_disclosable_activity_at",
+        "latest_disclosable_activity_at",
+        "-disclosed_at",
+        "disclosed_at",
+        "-total_awarded_amount",
+        "total_awarded_amount",
+        "-votes",
+        "votes",
+      ])
+      .optional()
+      .describe("Sort order; '-' prefix is descending"),
+    page_size: z.number().min(1).max(100).optional().describe("Results (default 25)"),
   },
-  async (params) => {
-    try {
-      const results = await searchDisclosedReports(params);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(results, null, 2),
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
-    }
-  }
+  (p) => h1.searchDisclosedReports(p)
 );
 
-// ── Tool: create_report_intent ─────────────────────────────────────
-server.tool(
+// ══ Validation ════════════════════════════════════════════════════
+tool(
+  "validate_report",
+  "Check a report you have drafted against the program's live scope, accepted weaknesses, and reward " +
+    "exclusions before filing it. Stateless — pass the fields you plan to submit; nothing is stored or sent. " +
+    "Reports blocking errors separately from advisory warnings.",
+  {
+    program_handle: programHandle,
+    title: z.string().optional(),
+    vulnerability_information: z.string().optional(),
+    impact: z.string().optional(),
+    severity_rating: severity.optional(),
+    weakness_id: z.string().optional().describe("Weakness id from get_program_weaknesses"),
+    structured_scope_id: z.string().optional().describe("Asset id from get_program_scope"),
+  },
+  (p) => h1.validateReport(p)
+);
+
+
+// ══ Report intents (HackerOne-side drafts) ════════════════════════
+tool(
   "create_report_intent",
-  "Create a draft report (report intent) on HackerOne. Report intents are saved as pending drafts that can be edited and submitted later. Use this instead of submit_report when you want to draft before submitting.",
+  "Save a draft report on HackerOne. HackerOne's AI assistant rewrites your description into its own report " +
+    "template and generates the title, so you cannot set the title, severity, weakness or scope here — only the " +
+    "description. Waits for that assistant job to finish before returning. Creates and updates are heavily " +
+    "rate-limited (~4 per 10 minutes), so compose the text before calling rather than iterating through this tool.",
   {
-    program_handle: z.string().describe("Program handle (e.g. 'deptofdefense')"),
-    description: z
-      .string()
-      .describe(
-        "Full vulnerability details in markdown — summary, steps to reproduce, impact, evidence"
-      ),
-    title: z.string().optional().describe("Report title (optional, can be set later)"),
+    program_handle: programHandle,
+    description: z.string().describe("Vulnerability details in markdown; will be rewritten by HackerOne"),
+    wait: z
+      .boolean()
+      .optional()
+      .describe("Wait for HackerOne's assistant to finish reformatting (default true)"),
   },
-  async (params) => {
-    try {
-      const result = await createReportIntent(params);
-      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-    } catch (err: any) {
-      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
-    }
-  }
+  (p) => h1.createReportIntent(p)
 );
 
-// ── Tool: list_report_intents ──────────────────────────────────────
-server.tool(
-  "list_report_intents",
-  "List all your HackerOne report intents (drafts), including their state (pending, ready_to_submit, submitted).",
-  {},
-  async () => {
-    try {
-      const result = await listReportIntents();
-      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-    } catch (err: any) {
-      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
-    }
-  }
+tool("list_report_intents", "List your HackerOne report intents and their states.", {}, () =>
+  h1.listReportIntents()
 );
 
-// ── Tool: get_report_intent ────────────────────────────────────────
-server.tool(
-  "get_report_intent",
-  "Get details of a specific HackerOne report intent (draft) by ID.",
-  {
-    id: z.string().describe("Report intent ID"),
-  },
-  async ({ id }) => {
-    try {
-      const result = await getReportIntent(id);
-      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-    } catch (err: any) {
-      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
-    }
-  }
+tool("get_report_intent", "Get one report intent by id.", { id: z.string() }, ({ id }) =>
+  h1.getReportIntent(id)
 );
 
-// ── Tool: update_report_intent ─────────────────────────────────────
-server.tool(
+tool(
   "update_report_intent",
-  "Update the title or description of a HackerOne report intent (draft).",
+  "Replace a report intent's description. Description is the only editable field — title is generated by HackerOne. " +
+    "Waits for their assistant to finish reprocessing before returning, so the result is not stale.",
   {
-    id: z.string().describe("Report intent ID"),
-    title: z.string().optional().describe("Updated title"),
-    description: z.string().optional().describe("Updated vulnerability description in markdown"),
+    id: z.string().describe("Report intent id"),
+    description: z.string().describe("New vulnerability description in markdown"),
   },
-  async ({ id, title, description }) => {
-    try {
-      const result = await updateReportIntent(id, { title, description });
-      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-    } catch (err: any) {
-      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
-    }
-  }
+  ({ id, description }) => h1.updateReportIntent(id, description)
 );
 
-// ── Tool: delete_report_intent ─────────────────────────────────────
-server.tool(
-  "delete_report_intent",
-  "Delete a HackerOne report intent (draft) by ID.",
-  {
-    id: z.string().describe("Report intent ID to delete"),
-  },
-  async ({ id }) => {
-    try {
-      const result = await deleteReportIntent(id);
-      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-    } catch (err: any) {
-      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
-    }
-  }
+tool("delete_report_intent", "Delete a report intent.", { id: z.string() }, ({ id }) =>
+  h1.deleteReportIntent(id)
 );
 
-// ── Tool: submit_report_intent ─────────────────────────────────────
-server.tool(
+tool(
+  "wait_for_intent_ready",
+  "Poll a report intent until HackerOne's assistant job finishes and the state settles.",
+  {
+    id: z.string().describe("Report intent id"),
+    timeout_ms: z.number().min(1000).max(300000).optional().describe("Give up after this long (default 60s)"),
+  },
+  ({ id, timeout_ms }) => h1.waitForIntentReady(id, timeout_ms)
+);
+
+tool(
   "submit_report_intent",
-  "Submit a HackerOne report intent (draft), converting it into a full submitted report. Only call this after explicit user approval.",
+  "Convert a report intent into a real submitted report. IRREVERSIBLE. " +
+    "Requires confirm=true, which you may only pass after the user has explicitly approved this exact submission.",
   {
-    id: z.string().describe("Report intent ID to submit"),
+    id: z.string().describe("Report intent id"),
+    confirm: z.boolean().describe("Must be true. Only set after explicit user approval."),
   },
-  async ({ id }) => {
-    try {
-      const result = await submitReportIntent(id);
-      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-    } catch (err: any) {
-      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+  ({ id, confirm }) => h1.submitReportIntent(id, confirm)
+);
+
+tool("list_intent_attachments", "List files attached to a report intent.", { id: z.string() }, ({ id }) =>
+  h1.listIntentAttachments(id)
+);
+
+tool(
+  "upload_intent_attachments",
+  "Upload local files (screenshots, PoC scripts, HTTP logs) to a report intent.",
+  {
+    id: z.string().describe("Report intent id"),
+    file_paths: z.array(z.string()).min(1).describe("Absolute paths of files to upload"),
+  },
+  ({ id, file_paths }) => h1.uploadIntentAttachments(id, file_paths)
+);
+
+tool(
+  "delete_intent_attachment",
+  "Remove one attachment from a report intent.",
+  { id: z.string().describe("Report intent id"), attachment_id: z.string() },
+  ({ id, attachment_id }) => h1.deleteIntentAttachment(id, attachment_id)
+);
+
+// ══ Direct writes ═════════════════════════════════════════════════
+tool(
+  "submit_report",
+  "Submit a report to HackerOne directly, bypassing the draft workflow. IRREVERSIBLE. " +
+    "Run validate_report first to catch out-of-scope assets and unaccepted weaknesses. " +
+    "Requires confirm=true, which you may only pass after explicit user approval.",
+  {
+    program_handle: programHandle,
+    title: z.string().describe("Report title"),
+    vulnerability_information: z.string().describe("Full details in markdown"),
+    impact: z.string().describe("What an attacker achieves (required by HackerOne)"),
+    severity_rating: severity.optional(),
+    weakness_id: z.string().optional().describe("Weakness id from get_program_weaknesses"),
+    structured_scope_id: z.string().optional().describe("Asset id from get_program_scope"),
+    confirm: z.boolean().describe("Must be true. Only set after explicit user approval."),
+  },
+  ({ confirm, ...opts }) => {
+    if (!confirm) {
+      throw new Error(
+        `submit_report files a real report to '${opts.program_handle}' and cannot be undone. ` +
+          `Re-run with confirm=true once the user has explicitly approved it.`
+      );
     }
+    return h1.submitReport(opts);
   }
 );
 
-// ── Start server ───────────────────────────────────────────────────
+tool(
+  "add_comment",
+  "Add a comment to one of your reports — respond to triage questions or supply more information.",
+  {
+    report_id: z.string(),
+    message: z.string().describe("Comment text (markdown supported)"),
+    internal: z.boolean().optional().describe("Team-only comment (default false)"),
+  },
+  ({ report_id, message, internal }) => h1.addComment(report_id, message, internal ?? false)
+);
+
+tool(
+  "close_report",
+  "Withdraw one of your own reports with an optional message.",
+  { report_id: z.string(), message: z.string().optional().describe("Reason for closing") },
+  ({ report_id, message }) => h1.closeReport(report_id, message)
+);
+
+// ══ Account ═══════════════════════════════════════════════════════
+tool(
+  "get_earnings",
+  "Your bounty earnings history: amounts, currency, dates, and paying programs.",
+  { page_size: z.number().min(1).max(100).optional() },
+  ({ page_size }) => h1.getEarnings(page_size)
+);
+
+tool(
+  "get_payouts",
+  "Your payout transactions: amount, provider, reference, and status.",
+  { page_size: z.number().min(1).max(100).optional() },
+  ({ page_size }) => h1.getPayouts(page_size)
+);
+
+tool("get_balance", "Your current unpaid bounty balance.", {}, () => h1.getBalance());
+
+tool(
+  "get_hacker_profile",
+  "Your hacker profile: username, reputation, signal, and account info.",
+  {},
+  () => h1.getHackerProfile()
+);
+
+// ══ Start ═════════════════════════════════════════════════════════
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);

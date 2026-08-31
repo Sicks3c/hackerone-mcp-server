@@ -350,26 +350,42 @@ function invalidateAfterWrite(pathname: string): void {
 }
 
 // ── Pagination ────────────────────────────────────────────────────
+export interface PagedResult {
+  rows: any[];
+  /** True when maxPages was hit and more rows exist server-side. */
+  truncated: boolean;
+  pages: number;
+}
+
 /**
  * Walk a JSON:API collection by following `links.next`, which is exact —
  * unlike guessing page counts.
+ *
+ * Reports truncation rather than hiding it: stopping at maxPages and returning
+ * a bare array is indistinguishable from "that was everything", which is how a
+ * caller ends up asserting an asset is out of scope when the page holding it
+ * was simply never fetched.
  */
 export async function h1FetchAll(
   path: string,
   params?: Record<string, string | undefined>,
   maxPages = 20
-): Promise<any[]> {
+): Promise<PagedResult> {
   const all: any[] = [];
   let page = await h1Request(path, {
     params: { "page[size]": "100", ...params },
   });
 
-  for (let i = 0; i < maxPages; i++) {
+  let i = 0;
+  for (; i < maxPages; i++) {
     const rows = page.data ?? [];
     all.push(...rows);
     const next = page.links?.next;
-    if (!next || rows.length === 0) break;
+    if (!next || rows.length === 0) {
+      return { rows: all, truncated: false, pages: i + 1 };
+    }
     page = await h1Request(path, { url: next });
   }
-  return all;
+  // Fell out of the loop with a `next` link still pending.
+  return { rows: all, truncated: true, pages: i };
 }

@@ -51,7 +51,7 @@ Or add manually to `~/.claude.json`:
 ```bash
 claude
 > /mcp
-# You should see "hackerone" listed with 28 tools
+# You should see "hackerone" listed with 26 tools
 ```
 
 ## Drafting a report
@@ -74,11 +74,20 @@ Three things about intents are worth knowing, all verified against the live API:
 - **`description` is the only editable field.** Severity, weakness and scope
   cannot be attached to an intent at all — they are set when the report is
   filed, not while it is a draft.
-- **Writes are asynchronous and rewrite your prose.** Creating or updating an
-  intent queues an assistant job that reformats your description into
-  HackerOne's report template. The API responds *before* that job runs, so the
-  response is already stale. `create_report_intent` and `update_report_intent`
-  wait for it to settle; `wait_for_intent_ready` does it on demand.
+- **Writes are asynchronous.** Creating or updating an intent queues an
+  assistant job on HackerOne's side. The API responds *before* that job runs, so
+  the response is already stale. `create_report_intent` and
+  `update_report_intent` wait for it to settle; `wait_for_intent_ready` does it
+  on demand.
+- **The assistant usually rewrites your prose — but it reads your description
+  as instructions.** Verified with an A/B test on identical technical content:
+  prefixed with "TEST DRAFT — not a real finding; do not submit", the text came
+  back verbatim with the title left as `Report Intent #<id>`; without that line,
+  the same content was reformatted into HackerOne's template under a generated
+  title. So check what came back rather than assuming a rewrite happened —
+  and **never put untrusted text in a description** (a scraped page, a captured
+  HTTP response, an attacker-controlled string in a PoC). It is fed to a third
+  party's LLM that demonstrably acts on instructions inside it.
 
 Creates and updates are heavily rate-limited (see below), so compose your
 description before calling rather than iterating through the API.
@@ -96,9 +105,10 @@ says so as a warning rather than reporting a pass or a fail it cannot justify.
 
 ## Tools
 
-All 28 tools carry MCP annotations (`readOnlyHint`, `destructiveHint`,
+All 26 tools carry MCP annotations (`readOnlyHint`, `destructiveHint`,
 `idempotentHint`, `openWorldHint`), so a client can tell a read from an
-irreversible write without parsing prose. 21 are read-only; 7 mutate.
+irreversible write without parsing prose. 19 are read-only; 7 mutate, of which
+4 are destructive.
 
 ### Report intents (HackerOne-side drafts)
 
@@ -120,19 +130,17 @@ irreversible write without parsing prose. 21 are read-only; 7 mutate.
 | Tool | Description |
 |------|-------------|
 | `validate_report` | Check a report against live scope, weaknesses, and reward exclusions |
-| `search_reports` | Search and filter your reports by keyword, program, severity, or state |
-| `get_report` | Full report details including CVSS 4.0 vector and metrics, bounty, attachments |
-| `get_report_with_conversation` | A report plus every message-bearing activity in its thread |
-| `get_report_activities` | Raw activity timeline |
-| `list_programs` | Programs you have access to (auto-paginates) |
+| `search_reports` | Filter your reports by keyword, program, severity, state, or `awaiting_reply` |
+| `get_report` | A report, optionally with its timeline — pass `include: ["conversation"]` or `["activities"]` |
+| `list_programs` | Programs you can access, filterable by `bookmarked_only`, submission state, bounties |
 | `get_program_details` | Program metadata, bounty settings, and your own stats for it |
 | `get_program_scope` | In-scope assets, bounty eligibility, severity caps (auto-paginates) |
-| `get_scope_changes` | Assets added or changed since a date — server-side filtered |
+| `get_scope_changes` | Assets added or changed since a date, across one program, several, or all bookmarked |
 | `get_program_weaknesses` | Weakness/CWE types a program accepts (auto-paginates) |
 | `get_scope_exclusions` | Report categories excluded from rewards |
 | `search_disclosed_reports` | Search hacktivity with HackerOne's Lucene query engine |
 | `analyze_report_patterns` | Your hunting patterns (severity, states, programs, assets) |
-| `get_earnings` | Bounty earnings history |
+| `get_earnings` | Bounty earnings: amount, bonus, currency, and the report each award came from |
 | `get_payouts` | Payout transactions (provider, reference, status) |
 | `get_balance` | Current unpaid bounty balance |
 | `get_hacker_profile` | Your username, reputation, and signal |
@@ -142,6 +150,20 @@ irreversible write without parsing prose. 21 are read-only; 7 mutate.
 | Tool | Description |
 |------|-------------|
 | `submit_report` | Submit a report directly — irreversible, requires `confirm: true` |
+
+### The two submission paths carry different things
+
+Neither path can produce a complete report, and the API offers no way around it:
+
+|  | `submit_report` | report intent |
+|--|--|--|
+| severity / weakness / scope | yes | **no** |
+| attachments | **no** | yes |
+
+Attachment endpoints exist only under `/hackers/report_intents`, and an intent
+accepts only a `description`. If the finding needs a screenshot or PoC file, go
+through the intent flow; if it needs a CWE and an asset, use `submit_report`.
+Both tool descriptions state this.
 
 ### Deliberately absent: commenting and closing reports
 
@@ -218,6 +240,13 @@ A genuine 403 is none of the above and means something else entirely.
   wrapper, as does `balance`.
 - **There is no `/hackers/me`.** Profile data is only reachable via the
   `reporter` relationship on your own reports.
+- **`last_activity_at` is null on every report** — verified across a full
+  account history. The populated fields are `last_program_activity_at`,
+  `last_reporter_activity_at`, `first_program_activity_at` and
+  `last_public_activity_at`. `search_reports` exposes those and derives
+  `awaiting_your_reply` from them (program spoke last, and the report is open).
+- **Earnings have only `{amount, created_at}`.** The award detail and the
+  originating report are on the `bounty` relationship, not on the earning.
 
 ### Rate limits
 
@@ -284,6 +313,9 @@ Analyze my report patterns — what severity gets resolved most?
 - Runs locally over stdio — your credentials never leave your machine
 - Auto-paginates by following the API's own `links.next` where the endpoint
   provides it; hacktivity and report intents do not, and are handled explicitly
+- Paginated results carry `count` and, when the page cap is hit, `truncated:
+  true` — a partial list is never returned as though it were complete
+- List payloads are compact JSON, and `list_programs` never includes policy text
 - 60-second response cache on reads, invalidated on writes
 - Errors carry the status code, method, path, and response body
 

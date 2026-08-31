@@ -13,6 +13,8 @@ export interface SearchReportsOpts {
   program?: string;
   severity?: string;
   state?: string;
+  /** Only reports where the program replied after you last did. */
+  awaiting_reply?: boolean;
   page_size?: number;
   page_number?: number;
   sort?: string;
@@ -21,12 +23,17 @@ export interface SearchReportsOpts {
 
 export async function searchReports(opts: SearchReportsOpts = {}) {
   const requestedSize = opts.page_size ?? 25;
-  const needsFilter = !!(opts.program || opts.severity || opts.state || opts.query);
+  const needsFilter = !!(
+    opts.program || opts.severity || opts.state || opts.query || opts.awaiting_reply
+  );
 
   let raw: any[];
+  let truncated = false;
   if (needsFilter) {
     // Any filter means we must scan the full history ourselves.
-    raw = await h1FetchAll("/hackers/me/reports", undefined, opts.max_pages ?? 20);
+    const paged = await h1FetchAll("/hackers/me/reports", undefined, opts.max_pages ?? 20);
+    raw = paged.rows;
+    truncated = paged.truncated;
   } else {
     const page = await h1Request("/hackers/me/reports", {
       params: {
@@ -49,6 +56,9 @@ export async function searchReports(opts: SearchReportsOpts = {}) {
   if (opts.state) {
     reports = reports.filter((r) => r.state === opts.state);
   }
+  if (opts.awaiting_reply) {
+    reports = reports.filter((r) => r.awaiting_your_reply);
+  }
   if (opts.query) {
     const q = opts.query.toLowerCase();
     reports = reports.filter(
@@ -70,8 +80,27 @@ export async function searchReports(opts: SearchReportsOpts = {}) {
     });
   }
 
+  const matched = reports.length;
   if (needsFilter) reports = reports.slice(0, requestedSize);
-  return reports.map(({ _vuln_info, ...rest }) => rest);
+  return {
+    count: reports.length,
+    matched,
+    ...(truncated
+      ? {
+          truncated: true,
+          note: `Scanned the first ${(opts.max_pages ?? 20) * 100} reports only; older ones were not searched. Raise max_pages to go further.`,
+        }
+      : {}),
+    results: reports.map(({ _vuln_info, ...rest }) => rest),
+  };
+}
+
+function awaitingReply(attrs: any): boolean {
+  const prog = attrs.last_program_activity_at;
+  const you = attrs.last_reporter_activity_at;
+  if (!prog) return false;
+  if (attrs.closed_at) return false;
+  return !you || prog > you;
 }
 
 // The list endpoint carries a narrower payload than /hackers/reports/{id}:
@@ -92,7 +121,14 @@ function mapReportSummary(r: any) {
     closed_at: r.attributes.closed_at,
     disclosed_at: r.attributes.disclosed_at,
     bounty_awarded_at: r.attributes.bounty_awarded_at,
-    last_activity_at: r.attributes.last_activity_at,
+    // last_activity_at is null on every report the API returns — verified
+    // across this account's full history. These are the ones actually populated.
+    last_program_activity_at: r.attributes.last_program_activity_at,
+    last_reporter_activity_at: r.attributes.last_reporter_activity_at,
+    first_program_activity_at: r.attributes.first_program_activity_at,
+    last_public_activity_at: r.attributes.last_public_activity_at,
+    // The program spoke after you did: this report is waiting on your reply.
+    awaiting_your_reply: awaitingReply(r.attributes),
     asset: scope?.asset_identifier ?? null,
     program: r.relationships?.program?.data?.attributes?.handle ?? null,
     _vuln_info: r.attributes.vulnerability_information,
@@ -181,18 +217,73 @@ export async function getReportActivities(reportId: string, _pageSize = 50) {
 }
 
 // ── Programs ──────────────────────────────────────────────────────
-export async function listPrograms(pageSize = 50) {
-  const allData = await h1FetchAll("/hackers/programs");
-  const programs = allData.map((p: any) => ({
-    id: p.id,
-    handle: p.attributes.handle,
-    name: p.attributes.name,
-    offers_bounties: p.attributes.offers_bounties,
-    state: p.attributes.state,
-    started_accepting_at: p.attributes.started_accepting_at,
-    submission_state: p.attributes.submission_state,
-  }));
-  return pageSize && pageSize < programs.length ? programs.slice(0, pageSize) : programs;
+// The list response carries 19 attributes; only `policy` and `profile_picture`
+// are deliberately dropped — policy alone would be megabytes across 600
+// programs. `bookmarked` matters most: it is the only way to identify the
+// programs you actually follow.
+const mapProgram = (p: any) => ({
+  id: p.id,
+  handle: p.attributes.handle,
+  name: p.attributes.name,
+  bookmarked: p.attributes.bookmarked,
+  state: p.attributes.state,
+  submission_state: p.attributes.submission_state,
+  triage_active: p.attributes.triage_active,
+  offers_bounties: p.attributes.offers_bounties,
+  currency: p.attributes.currency,
+  open_scope: p.attributes.open_scope,
+  fast_payments: p.attributes.fast_payments,
+  allows_bounty_splitting: p.attributes.allows_bounty_splitting,
+  gold_standard_safe_harbor: p.attributes.gold_standard_safe_harbor,
+  started_accepting_at: p.attributes.started_accepting_at,
+  number_of_reports_for_user: p.attributes.number_of_reports_for_user,
+  number_of_valid_reports_for_user: p.attributes.number_of_valid_reports_for_user,
+  bounty_earned_for_user: p.attributes.bounty_earned_for_user,
+});
+
+async function listProgramRows(): Promise<any[]> {
+  return (await h1FetchAll("/hackers/programs")).rows.map(mapProgram);
+}
+
+export interface ListProgramsOpts {
+  page_size?: number;
+  bookmarked_only?: boolean;
+  submission_state?: string;
+  offers_bounties?: boolean;
+  query?: string;
+}
+
+export async function listPrograms(opts: ListProgramsOpts = {}) {
+  const paged = await h1FetchAll("/hackers/programs");
+  let programs = paged.rows.map(mapProgram);
+  const total = programs.length;
+
+  if (opts.bookmarked_only) programs = programs.filter((p) => p.bookmarked);
+  if (opts.submission_state) {
+    programs = programs.filter((p) => p.submission_state === opts.submission_state);
+  }
+  if (opts.offers_bounties !== undefined) {
+    programs = programs.filter((p) => p.offers_bounties === opts.offers_bounties);
+  }
+  if (opts.query) {
+    const q = opts.query.toLowerCase();
+    programs = programs.filter(
+      (p) =>
+        p.handle?.toLowerCase().includes(q) || p.name?.toLowerCase().includes(q)
+    );
+  }
+
+  const matched = programs.length;
+  if (opts.page_size && opts.page_size < programs.length) {
+    programs = programs.slice(0, opts.page_size);
+  }
+  return {
+    count: programs.length,
+    matched,
+    total_available: total,
+    ...(paged.truncated ? { truncated: true } : {}),
+    programs,
+  };
 }
 
 export async function getProgramDetails(handle: string, includePolicy = true) {
@@ -234,6 +325,16 @@ export async function getProgramDetails(handle: string, includePolicy = true) {
   };
 }
 
+function envelope(paged: { rows: any[]; truncated: boolean }, mapped: any[], key: string) {
+  return {
+    count: mapped.length,
+    ...(paged.truncated
+      ? { truncated: true, note: "Hit the page cap; more exist server-side." }
+      : {}),
+    [key]: mapped,
+  };
+}
+
 function mapScope(s: any) {
   return {
     id: s.id,
@@ -248,10 +349,16 @@ function mapScope(s: any) {
   };
 }
 
-export async function getProgramScope(handle: string, pageSize = 100) {
-  const allData = await h1FetchAll(`/hackers/programs/${handle}/structured_scopes`);
-  const scopes = allData.map(mapScope);
-  return pageSize && pageSize < scopes.length ? scopes.slice(0, pageSize) : scopes;
+export async function getProgramScope(handle: string, pageSize?: number) {
+  const paged = await h1FetchAll(`/hackers/programs/${handle}/structured_scopes`);
+  let scopes = paged.rows.map(mapScope);
+  if (pageSize && pageSize < scopes.length) scopes = scopes.slice(0, pageSize);
+  return envelope(paged, scopes, "scopes");
+}
+
+/** Flat list, for internal callers that just need the rows. */
+async function scopeRows(handle: string): Promise<any[]> {
+  return (await h1FetchAll(`/hackers/programs/${handle}/structured_scopes`)).rows.map(mapScope);
 }
 
 /**
@@ -260,20 +367,55 @@ export async function getProgramScope(handle: string, pageSize = 100) {
  * rather than a client-side scan.
  */
 export async function getScopeChanges(
-  handle: string,
+  handles: string | string[],
   since: string,
-  field: "updated_at" | "created_at" = "updated_at"
+  field: "updated_at" | "created_at" = "updated_at",
+  bookmarkedOnly = false
 ) {
   const iso = normalizeSince(since);
-  const rows = await h1FetchAll(`/hackers/programs/${handle}/structured_scopes`, {
-    [`filter[${field}__gt]`]: iso,
-  });
+
+  let list: string[];
+  if (bookmarkedOnly) {
+    list = (await listProgramRows())
+      .filter((p: any) => p.bookmarked)
+      .map((p: any) => p.handle);
+    if (list.length === 0) {
+      return {
+        since: iso,
+        compared_on: field,
+        programs: [],
+        count: 0,
+        note: "You have no bookmarked programs. Bookmark them on hackerone.com, or pass handles explicitly.",
+        scopes: [],
+      };
+    }
+  } else {
+    list = Array.isArray(handles) ? handles : [handles];
+  }
+
+  // Sequential on purpose: structured_scopes is capped at 50 req/min and the
+  // limiter would otherwise just serialise these anyway, with worse errors.
+  const scopes: any[] = [];
+  const failures: { program: string; error: string }[] = [];
+  for (const handle of list) {
+    try {
+      const paged = await h1FetchAll(`/hackers/programs/${handle}/structured_scopes`, {
+        [`filter[${field}__gt]`]: iso,
+      });
+      for (const row of paged.rows) scopes.push({ program: handle, ...mapScope(row) });
+    } catch (e: any) {
+      failures.push({ program: handle, error: e.message });
+    }
+  }
+
   return {
-    program: handle,
     since: iso,
     compared_on: field,
-    count: rows.length,
-    scopes: rows.map(mapScope),
+    programs: list,
+    count: scopes.length,
+    // Never let a failed program read as "nothing changed there".
+    ...(failures.length ? { failed: failures } : {}),
+    scopes,
   };
 }
 
@@ -288,51 +430,79 @@ function normalizeSince(since: string): string {
   return d.toISOString().replace(/\.\d{3}Z$/, "+00:00");
 }
 
-export async function getProgramWeaknesses(handle: string, pageSize = 100) {
-  const allData = await h1FetchAll(`/hackers/programs/${handle}/weaknesses`);
-  const weaknesses = allData.map((w: any) => ({
-    id: w.id,
-    name: w.attributes.name,
-    description: w.attributes.description,
-    external_id: w.attributes.external_id,
-  }));
-  return pageSize && pageSize < weaknesses.length
-    ? weaknesses.slice(0, pageSize)
-    : weaknesses;
+const mapWeakness = (w: any) => ({
+  id: w.id,
+  name: w.attributes.name,
+  description: w.attributes.description,
+  external_id: w.attributes.external_id,
+});
+
+export async function getProgramWeaknesses(handle: string, pageSize?: number) {
+  const paged = await h1FetchAll(`/hackers/programs/${handle}/weaknesses`);
+  let rows = paged.rows.map(mapWeakness);
+  if (pageSize && pageSize < rows.length) rows = rows.slice(0, pageSize);
+  return envelope(paged, rows, "weaknesses");
+}
+
+async function weaknessRows(handle: string): Promise<any[]> {
+  return (await h1FetchAll(`/hackers/programs/${handle}/weaknesses`)).rows.map(mapWeakness);
 }
 
 /** Report categories a program excludes from rewards (added Apr 2026). */
+const mapExclusion = (e: any) => ({
+  id: e.id,
+  category: e.attributes?.category,
+  details: e.attributes?.details,
+  created_at: e.attributes?.created_at,
+  updated_at: e.attributes?.updated_at,
+});
+
 export async function getScopeExclusions(handle: string) {
-  const rows = await h1FetchAll(`/hackers/programs/${handle}/scope_exclusions`);
-  return rows.map((e: any) => ({
-    id: e.id,
-    category: e.attributes?.category,
-    details: e.attributes?.details,
-    created_at: e.attributes?.created_at,
-    updated_at: e.attributes?.updated_at,
-  }));
+  const paged = await h1FetchAll(`/hackers/programs/${handle}/scope_exclusions`);
+  return envelope(paged, paged.rows.map(mapExclusion), "exclusions");
+}
+
+async function exclusionRows(handle: string): Promise<any[]> {
+  return (await h1FetchAll(`/hackers/programs/${handle}/scope_exclusions`)).rows.map(mapExclusion);
 }
 
 // ── Payments ──────────────────────────────────────────────────────
-export async function getEarnings(pageSize = 100) {
-  const data = await h1Request("/hackers/payments/earnings", {
-    params: { "page[size]": String(pageSize) },
+export async function getEarnings(pageSize = 100, pageNumber?: number) {
+  const params: Record<string, string> = { "page[size]": String(pageSize) };
+  if (pageNumber) params["page[number]"] = String(pageNumber);
+  const data = await h1Request("/hackers/payments/earnings", { params });
+
+  const rows = (data.data ?? []).map((e: any) => {
+    // The documented earning attributes are {amount, created_at}. The previous
+    // `awarded_by_name` does not exist, and the bounty relationship — which
+    // carries the award detail and the originating report — was discarded.
+    const bounty = e.relationships?.bounty?.data;
+    const b = bounty?.attributes ?? {};
+    const report = bounty?.relationships?.report?.data;
+    const program = e.relationships?.program?.data?.attributes;
+    return {
+      id: e.id,
+      type: e.type,
+      amount: e.attributes?.amount,
+      created_at: e.attributes?.created_at,
+      program: program?.handle ?? null,
+      currency: b.awarded_currency ?? program?.currency ?? null,
+      bounty_amount: b.awarded_amount ?? null,
+      bonus_amount: b.awarded_bonus_amount ?? null,
+      report_id: report?.id ?? null,
+      report_title: report?.attributes?.title ?? null,
+    };
   });
-  return (data.data ?? []).map((e: any) => ({
-    id: e.id,
-    amount: e.attributes.amount,
-    awarded_by: e.attributes.awarded_by_name,
-    created_at: e.attributes.created_at,
-    currency: e.relationships?.program?.data?.attributes?.currency ?? null,
-    program: e.relationships?.program?.data?.attributes?.handle ?? null,
-  }));
+  return { count: rows.length, page: pageNumber ?? 1, earnings: rows };
 }
 
-export async function getPayouts(pageSize = 100) {
-  const data = await h1Request("/hackers/payments/payouts", {
-    params: { "page[size]": String(pageSize) },
-  });
-  return (data.data ?? []).map((p: any) => {
+export async function getPayouts(pageSize = 100, pageNumber?: number) {
+  const params: Record<string, string> = { "page[size]": String(pageSize) };
+  if (pageNumber) params["page[number]"] = String(pageNumber);
+  const data = await h1Request("/hackers/payments/payouts", { params });
+
+  // This endpoint returns flat objects with no JSON:API attributes wrapper.
+  const rows = (data.data ?? []).map((p: any) => {
     const a = p.attributes ?? p;
     return {
       id: p.id ?? null,
@@ -343,6 +513,7 @@ export async function getPayouts(pageSize = 100) {
       status: a.status,
     };
   });
+  return { count: rows.length, page: pageNumber ?? 1, payouts: rows };
 }
 
 export async function getBalance() {
@@ -381,6 +552,26 @@ export async function getHackerProfile() {
     created_at: attrs.created_at,
     hackerone_triager: attrs.hackerone_triager,
   };
+}
+
+/**
+ * One call for a report and, optionally, its timeline. get_report,
+ * get_report_activities and get_report_with_conversation all hit the same
+ * endpoint; an agent that called two paid for the same payload twice.
+ */
+export async function getReportBundle(
+  reportId: string,
+  include: string[] = []
+) {
+  const report = await getReport(reportId);
+  const out: Record<string, unknown> = { ...report };
+  if (include.includes("activities")) {
+    out.activities = await getReportActivities(reportId);
+  }
+  if (include.includes("conversation")) {
+    out.conversation = (await getReportSummary(reportId)).conversation;
+  }
+  return out;
 }
 
 // ── Report summary (condensed for Claude context) ──────────────────
@@ -577,10 +768,9 @@ export async function analyzeReportPatterns(opts: {
   page_size?: number;
   include_weaknesses?: boolean;
 }) {
-  const reports = await searchReports({
-    page_size: opts.page_size ?? 100,
-    sort: "-reports.created_at",
-  });
+  const reports = (
+    await searchReports({ page_size: opts.page_size ?? 100, sort: "-reports.created_at" })
+  ).results;
 
   const tally = (rows: (string | null | undefined)[]) => {
     const counts: Record<string, number> = {};
@@ -705,9 +895,9 @@ export async function validateReport(input: ReportDraftInput) {
       }
     };
     const [scopeRes, weaknessRes, exclusionRes] = await Promise.all([
-      settle("scope", () => getProgramScope(input.program_handle, 1000)),
-      settle("weaknesses", () => getProgramWeaknesses(input.program_handle, 1000)),
-      settle("scope exclusions", () => getScopeExclusions(input.program_handle)),
+      settle("scope", () => scopeRows(input.program_handle)),
+      settle("weaknesses", () => weaknessRows(input.program_handle)),
+      settle("scope exclusions", () => exclusionRows(input.program_handle)),
     ]);
     for (const r of [scopeRes, weaknessRes, exclusionRes]) {
       if (!r.ok) {
@@ -802,9 +992,21 @@ export async function validateReport(input: ReportDraftInput) {
 // Behaviour verified against the live API:
 //  * `title` is not settable — HackerOne's assistant generates it.
 //  * `description` is the only patchable attribute.
-//  * Writes are async: state goes `pending`, an assistant job rewrites the
-//    description into HackerOne's report template, then state becomes
-//    `ready_to_submit`. Reading immediately after a write returns stale data.
+//  * Writes are async: state goes `pending`, an assistant job processes the
+//    description, then state becomes `ready_to_submit` (~6-17s). Reading
+//    immediately after a write returns stale data.
+//  * The rewrite is CONDITIONAL, and the assistant FOLLOWS INSTRUCTIONS found
+//    in the description. A/B tested on identical technical content: with a
+//    leading "TEST DRAFT — not a real finding; do not submit" line, the text
+//    came back verbatim and the title stayed "Report Intent #<id>"; without
+//    it, the same content was reformatted into HackerOne's template under a
+//    generated title.
+//
+//    Two consequences. Callers must not assume the description or title they
+//    get back was rewritten — check, do not presume. And any untrusted text
+//    placed in a description (a scraped page, a captured HTTP response, an
+//    attacker-controlled string in a PoC) is read as instructions by a third
+//    party's LLM: treat the description as a prompt-injection surface.
 function normalizeIntent(d: any) {
   const a = d.attributes ?? {};
   return {

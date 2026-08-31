@@ -51,7 +51,7 @@ function tool(
       try {
         const result = await handler(params);
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text" as const, text: JSON.stringify(result) }],
           isError: false,
         };
       } catch (err: any) {
@@ -81,6 +81,12 @@ tool(
       .enum(["new", "triaged", "needs-more-info", "resolved", "not-applicable", "informative", "duplicate", "spam"])
       .optional()
       .describe("Filter by report state"),
+    awaiting_reply: z
+      .boolean()
+      .optional()
+      .describe(
+        "Only open reports where the program posted after you last did — i.e. the ball is in your court."
+      ),
     page_size: z.number().min(1).max(100).optional().describe("Results to return (default 25)"),
     page_number: z.number().optional().describe("Page number; only used when no filter is set"),
     sort: z.string().optional().describe("Sort field, e.g. '-created_at' for newest first"),
@@ -91,28 +97,22 @@ tool(
 
 tool(
   "get_report",
-  "Get full details of a HackerOne report: vulnerability info, impact, severity, CVSS 4.0 vector " +
-    "and metrics, bounty, attachments, and program. Returns weakness_id as the CWE external_id " +
-    "(e.g. 'cwe-200'), which is NOT the numeric id submit_report wants.",
-  { report_id: z.string().describe("The HackerOne report ID") },
-  ({ report_id }) => h1.getReport(report_id)
-);
-
-tool(
-  "get_report_with_conversation",
-  "Get a report plus its full triage conversation — what triage asked, how you answered, and what led to resolution.",
-  { report_id: z.string().describe("The HackerOne report ID") },
-  ({ report_id }) => h1.getReportSummary(report_id)
-);
-
-tool(
-  "get_report_activities",
-  "Get a report's activity timeline: comments, state changes, bounty awards, and triage responses.",
+  "Get a HackerOne report: vulnerability info, impact, severity, CVSS 4.0 vector and metrics, " +
+    "bounty, attachments, and program. Optionally include the timeline in the same call — " +
+    "activities and conversation come from this same request, so asking for them here costs " +
+    "nothing extra. Returns weakness_id as the CWE external_id (e.g. 'cwe-200'), which is NOT " +
+    "the numeric id submit_report wants.",
   {
     report_id: z.string().describe("The HackerOne report ID"),
-    page_size: z.number().min(1).max(100).optional(),
+    include: z
+      .array(z.enum(["activities", "conversation"]))
+      .optional()
+      .describe(
+        "'conversation' = every message-bearing activity, for reading triage. " +
+        "'activities' = the raw timeline including state changes with no message."
+      ),
   },
-  ({ report_id, page_size }) => h1.getReportActivities(report_id, page_size)
+  ({ report_id, include }) => h1.getReportBundle(report_id, include ?? [])
 );
 
 tool(
@@ -132,9 +132,21 @@ tool(
 // ══ Programs ══════════════════════════════════════════════════════
 tool(
   "list_programs",
-  "List bug bounty programs you have access to. Auto-paginates.",
-  { page_size: z.number().min(1).max(1000).optional().describe("Max to return (default: all)") },
-  ({ page_size }) => h1.listPrograms(page_size)
+  "List bug bounty programs you have access to, with bounty settings and your own stats for each. " +
+    "Auto-paginates over all of them (hundreds), so filter rather than pulling the lot: " +
+    "bookmarked_only is the fastest way to get just the programs you follow. " +
+    "Policy text is never included here — use get_program_details for that.",
+  {
+    page_size: z.number().min(1).max(1000).optional().describe("Max to return after filtering"),
+    bookmarked_only: z.boolean().optional().describe("Only programs you have bookmarked on HackerOne"),
+    submission_state: z
+      .enum(["open", "paused", "disabled"])
+      .optional()
+      .describe("Only programs in this submission state ('open' = accepting reports)"),
+    offers_bounties: z.boolean().optional().describe("Only programs that pay bounties"),
+    query: z.string().optional().describe("Substring match against handle and name"),
+  },
+  (p) => h1.listPrograms(p)
 );
 
 tool(
@@ -168,14 +180,26 @@ tool(
   "get_scope_changes",
   "List scope assets added or changed since a date — server-side filtered. Use this to spot newly in-scope attack surface.",
   {
-    program_handle: programHandle,
+    program_handle: z
+      .union([z.string(), z.array(z.string())])
+      .optional()
+      .describe("One handle, or several to sweep in a single call. Omit when using bookmarked_only."),
+    bookmarked_only: z
+      .boolean()
+      .optional()
+      .describe("Sweep every program you have bookmarked — the daily recon loop, in one call."),
     since: z.string().describe("ISO-8601 date, e.g. '2026-01-01' or '2026-01-01T00:00:00+00:00'"),
     field: z
       .enum(["updated_at", "created_at"])
       .optional()
       .describe("Compare against last update (default) or original creation"),
   },
-  ({ program_handle, since, field }) => h1.getScopeChanges(program_handle, since, field)
+  ({ program_handle, since, field, bookmarked_only }) => {
+    if (!bookmarked_only && !program_handle) {
+      throw new Error("Pass program_handle (one or several) or bookmarked_only=true.");
+    }
+    return h1.getScopeChanges(program_handle ?? [], since, field, bookmarked_only ?? false);
+  }
 );
 
 tool(
@@ -270,10 +294,15 @@ tool(
 // ══ Report intents (HackerOne-side drafts) ════════════════════════
 tool(
   "create_report_intent",
-  "Save a draft report on HackerOne. HackerOne's AI assistant rewrites your description into its own report " +
-    "template and generates the title, so you cannot set the title, severity, weakness or scope here — only the " +
-    "description. Waits for that assistant job to finish before returning. Creates and updates are heavily " +
-    "rate-limited (~4 per 10 minutes), so compose the text before calling rather than iterating through this tool.",
+  "Save a draft report on HackerOne. An AI assistant on HackerOne's side processes your description and " +
+    "generates the title, so you cannot set the title, severity, weakness or scope here — only the description. " +
+    "It USUALLY reformats your text into HackerOne's report template, but not always: it reads the description " +
+    "as instructions, so wording like 'do not modify' can leave it verbatim. Check what came back rather than " +
+    "assuming it was rewritten. Never put untrusted text (scraped pages, captured responses) in the description " +
+    "— it is fed to a third party's LLM. Waits for that job to finish before returning. Creates and updates are heavily " +
+    "rate-limited (~4 per 10 minutes), so compose the text before calling rather than iterating through this tool. " +
+    "TRADE-OFF: this path can carry attachments (upload_intent_attachments) but CANNOT set severity, " +
+    "weakness or scope. submit_report can set those three but cannot carry attachments.",
   {
     program_handle: programHandle,
     description: z.string().describe("Vulnerability details in markdown; will be rewritten by HackerOne"),
@@ -367,6 +396,9 @@ tool(
   "submit_report",
   "Submit a report to HackerOne directly, bypassing the draft workflow. IRREVERSIBLE. " +
     "Run validate_report first to catch out-of-scope assets and unaccepted weaknesses. " +
+    "TRADE-OFF: this path can set severity, weakness and scope but CANNOT carry attachments. " +
+    "The report-intent path can carry attachments but cannot set any of those three. " +
+    "If the finding needs a screenshot or PoC file, use create_report_intent instead. " +
     "Requires confirm=true, which you may only pass after explicit user approval.",
   {
     program_handle: programHandle,
@@ -408,16 +440,22 @@ tool(
 // ══ Account ═══════════════════════════════════════════════════════
 tool(
   "get_earnings",
-  "Your bounty earnings history: amounts, currency, dates, and paying programs.",
-  { page_size: z.number().min(1).max(100).optional() },
-  ({ page_size }) => h1.getEarnings(page_size)
+  "Your bounty earnings: amount, bonus, currency, paying program, and the report each award came from.",
+  {
+    page_size: z.number().min(1).max(100).optional(),
+    page_number: z.number().min(1).optional().describe("1-based page, for history beyond the first 100"),
+  },
+  ({ page_size, page_number }) => h1.getEarnings(page_size, page_number)
 );
 
 tool(
   "get_payouts",
   "Your payout transactions: amount, provider, reference, and status.",
-  { page_size: z.number().min(1).max(100).optional() },
-  ({ page_size }) => h1.getPayouts(page_size)
+  {
+    page_size: z.number().min(1).max(100).optional(),
+    page_number: z.number().min(1).optional().describe("1-based page, for history beyond the first 100"),
+  },
+  ({ page_size, page_number }) => h1.getPayouts(page_size, page_number)
 );
 
 tool("get_balance", "Your current unpaid bounty balance.", {}, () => h1.getBalance());

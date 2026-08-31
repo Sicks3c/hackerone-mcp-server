@@ -28,12 +28,19 @@ function describeApiError(
   path: string
 ): string {
   const trimmed = body.length > 500 ? `${body.slice(0, 500)}…` : body;
+  // HackerOne returns 401 for BOTH bad credentials and paths that do not exist,
+  // so the hint must not send the reader off to debug a working token.
   const hints: Record<number, string> = {
     400: " — malformed body; check attribute names against the Hacker API docs",
-    401: " — check H1_USERNAME and H1_API_TOKEN",
+    401:
+      " — either the credentials are wrong OR this path is not a real Hacker API" +
+      " endpoint (HackerOne returns 401, not 404, for unrouted paths). If other" +
+      " calls are succeeding, it is the path.",
     403: " — your account lacks access to this program or endpoint",
-    404: " — unknown handle/id, or not visible to your account",
-    429: " — rate limited by HackerOne",
+    404: " — unknown handle/id, or wrong host (the API is api.hackerone.com)",
+    429:
+      " — rate limited. Do NOT retry immediately: on report_intents, retrying" +
+      " during a lockout appears to extend it. Wait ~10 minutes of full silence.",
   };
   const hint = hints[status] ?? "";
   return `HackerOne API error ${status} on ${method} ${path}${hint}: ${trimmed}`;
@@ -90,11 +97,26 @@ export function cacheInvalidatePrefix(prefix: string): void {
 }
 
 // ── Rate limiting ─────────────────────────────────────────────────
-// HackerOne documents 600 reads/min and 25 writes/20s, plus stricter
-// per-endpoint caps: 50/min on structured_scopes (documented) and an
-// undocumented, much tighter cap on report_intents writes. Measured
-// against the live API: ~6 report-intent creates trips it, and it stays
-// tripped for ~10 minutes — polling during the lockout does not clear it.
+// HackerOne documents 600 reads/min and 25 writes/20s, plus a documented
+// 50/min cap on structured_scopes.
+//
+// report_intents creates/updates additionally have an UNDOCUMENTED and much
+// tighter cap. Measured against the live API:
+//
+//   *** IT RETURNS HTTP 429. NOT 403. ***
+//
+// Stated explicitly because this is repeatedly misremembered as a 403. If you
+// are seeing a genuine 403 from this API, it is NOT this rate limit and you are
+// debugging the wrong thing. For reference, verified live:
+//   429 -> this rate limit (no Retry-After header is sent)
+//   401 -> bad credentials OR a path that is not a real endpoint (H1 does not 404 those)
+//   404 -> wrong HOST (e.g. hackerone.com instead of api.hackerone.com)
+//   400 -> malformed body, or an out-of-range id
+//
+// Shape of the limit: ~6 creates trips it; it stays tripped ~10 minutes;
+// polling during the lockout does NOT clear it (10 consecutive 1/min polls all
+// returned 429) while ~10 minutes of total silence does. So we refuse locally
+// rather than send, and never retry a 429 on this endpoint.
 interface LimitRule {
   label: string;
   match: RegExp;
@@ -107,6 +129,10 @@ interface LimitRule {
 
 const WRITE_METHODS = ["POST", "PATCH", "PUT", "DELETE"];
 
+// Safe to re-send after a network failure. POST/PATCH are deliberately absent:
+// a lost response may mean the write already succeeded.
+const IDEMPOTENT_METHODS = ["GET", "HEAD", "PUT", "DELETE"];
+
 const RULES: LimitRule[] = [
   {
     // Creates and updates each queue a HackerOne assistant job; that is what
@@ -114,7 +140,11 @@ const RULES: LimitRule[] = [
     // to the global write limit — otherwise cleaning up a draft you just made
     // would be blocked by the very quota that created it.
     label: "report_intents writes",
-    match: /\/report_intents/,
+    // Anchored: create (POST /report_intents) and update (PATCH /report_intents/{id})
+    // ONLY. Must not match /report_intents/{id}/attachments or /{id}/submit —
+    // those queue no assistant job and must never be blocked by this budget,
+    // least of all a submission the user has already approved.
+    match: /\/report_intents(\/\d+)?$/,
     methods: ["POST", "PATCH"],
     capacity: 4,
     windowMs: 10 * 60_000,
@@ -268,8 +298,17 @@ export async function h1Request(path: string, opts: RequestOpts = {}): Promise<a
       }
       res = await fetch(url.toString(), { method, headers, body });
     } catch (err: any) {
-      // Network-level failure: worth retrying, but never lose the reason.
+      // Network-level failure. We cannot tell "never arrived" from "arrived,
+      // processed, response lost" — so retrying a POST/PATCH risks filing a
+      // duplicate real report. Only idempotent methods may be retried.
       lastErr = err instanceof Error ? err : new Error(String(err));
+      if (!IDEMPOTENT_METHODS.includes(method)) {
+        throw new Error(
+          `${method} ${url.pathname} failed at the network level: ${lastErr.message}. ` +
+            `Not retried, because this request is not idempotent and may already ` +
+            `have been processed by HackerOne. Check the current state before retrying.`
+        );
+      }
       continue;
     }
 

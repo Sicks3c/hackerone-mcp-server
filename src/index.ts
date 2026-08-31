@@ -11,14 +11,29 @@ const server = new McpServer({ name: "hackerone", version: "3.0.0" });
 // The SDK types the callback's args from the schema shape, which TypeScript
 // cannot resolve through a generic wrapper. Args are validated by the schema
 // at runtime regardless, so bind one concrete signature here.
+// registerTool is the current API; server.tool() is deprecated in SDK 1.27.
+type ToolAnnotations = {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+};
 type RegisterTool = (
   name: string,
-  description: string,
-  schema: ZodRawShape,
+  config: { description?: string; inputSchema?: ZodRawShape; annotations?: ToolAnnotations },
   cb: (params: any) => Promise<CallToolResult>
 ) => void;
 
-const register = server.tool.bind(server) as unknown as RegisterTool;
+const register = server.registerTool.bind(server) as unknown as RegisterTool;
+
+// Annotation presets. Every tool here talks to a remote API, so openWorldHint
+// is true throughout; the meaningful distinctions are read vs write, and
+// whether a write can be undone.
+const READ_ONLY: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+const CREATES: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
+const UPDATES: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+const DESTRUCTIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
 
 // Every tool serialises its result the same way and reports failures as
 // tool errors rather than throwing out of the server.
@@ -26,22 +41,27 @@ function tool(
   name: string,
   description: string,
   schema: ZodRawShape,
-  handler: (params: any) => Promise<unknown>
+  handler: (params: any) => Promise<unknown>,
+  annotations: ToolAnnotations = READ_ONLY
 ): void {
-  register(name, description, schema, async (params: any): Promise<CallToolResult> => {
-    try {
-      const result = await handler(params);
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
-        isError: false,
-      };
-    } catch (err: any) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${err.message}` }],
-        isError: true,
-      };
+  register(
+    name,
+    { description, inputSchema: schema, annotations },
+    async (params: any): Promise<CallToolResult> => {
+      try {
+        const result = await handler(params);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+          isError: false,
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+          isError: true,
+        };
+      }
     }
-  });
+  );
 }
 
 const severity = z.enum(["none", "low", "medium", "high", "critical"]);
@@ -71,7 +91,9 @@ tool(
 
 tool(
   "get_report",
-  "Get full details of a HackerOne report: vulnerability info, impact, severity, CVSS vector, bounty, attachments, and program.",
+  "Get full details of a HackerOne report: vulnerability info, impact, severity, CVSS 4.0 vector " +
+    "and metrics, bounty, attachments, and program. Returns weakness_id as the CWE external_id " +
+    "(e.g. 'cwe-200'), which is NOT the numeric id submit_report wants.",
   { report_id: z.string().describe("The HackerOne report ID") },
   ({ report_id }) => h1.getReport(report_id)
 );
@@ -117,9 +139,19 @@ tool(
 
 tool(
   "get_program_details",
-  "Get a program's policy, response metrics, submission state, and bounty splitting settings.",
-  { program_handle: programHandle },
-  ({ program_handle }) => h1.getProgramDetails(program_handle)
+  "Get a program's policy, submission state, bounty settings, and your own stats for it " +
+    "(reports filed, valid reports, bounty earned). Note the Hacker API exposes no response-time " +
+    "or response-efficiency metrics for programs. The policy blob dominates the payload — " +
+    "pass include_policy=false when you only need the metadata.",
+  {
+    program_handle: programHandle,
+    include_policy: z
+      .boolean()
+      .optional()
+      .describe("Include the full policy text (default true). False returns just its length."),
+  },
+  ({ program_handle, include_policy }) =>
+    h1.getProgramDetails(program_handle, include_policy !== false)
 );
 
 tool(
@@ -181,7 +213,13 @@ tool(
       .describe("Filter by final report state"),
     reporter: z.string().optional().describe("Filter by reporter username"),
     min_bounty: z.number().optional().describe("Only reports awarding more than this amount"),
-    disclosed_only: z.boolean().optional().describe("Exclude undisclosed activity entries"),
+    disclosed_only: z
+      .boolean()
+      .optional()
+      .describe(
+        "Default true. Undisclosed hacktivity rows have null title/severity/CWE/bounty " +
+        "and no public URL, so they are useless as prior art. Set false only to survey raw activity."
+      ),
     sort: z
       .enum([
         "-latest_disclosable_activity_at",
@@ -195,7 +233,17 @@ tool(
       ])
       .optional()
       .describe("Sort order; '-' prefix is descending"),
-    page_size: z.number().min(1).max(100).optional().describe("Results (default 25)"),
+    page_size: z
+      .number()
+      .min(1)
+      .max(50)
+      .optional()
+      .describe("Results per page (default 25). HackerOne hard-caps this at 50."),
+    page_number: z
+      .number()
+      .min(1)
+      .optional()
+      .describe("1-based page. Hacktivity returns no pagination links, so page through with this."),
   },
   (p) => h1.searchDisclosedReports(p)
 );
@@ -234,7 +282,8 @@ tool(
       .optional()
       .describe("Wait for HackerOne's assistant to finish reformatting (default true)"),
   },
-  (p) => h1.createReportIntent(p)
+  (p) => h1.createReportIntent(p),
+  CREATES
 );
 
 tool("list_report_intents", "List your HackerOne report intents and their states.", {}, () =>
@@ -253,11 +302,13 @@ tool(
     id: z.string().describe("Report intent id"),
     description: z.string().describe("New vulnerability description in markdown"),
   },
-  ({ id, description }) => h1.updateReportIntent(id, description)
+  ({ id, description }) => h1.updateReportIntent(id, description),
+  UPDATES
 );
 
 tool("delete_report_intent", "Delete a report intent.", { id: z.string() }, ({ id }) =>
-  h1.deleteReportIntent(id)
+  h1.deleteReportIntent(id),
+  DESTRUCTIVE
 );
 
 tool(
@@ -276,9 +327,16 @@ tool(
     "Requires confirm=true, which you may only pass after the user has explicitly approved this exact submission.",
   {
     id: z.string().describe("Report intent id"),
-    confirm: z.boolean().describe("Must be true. Only set after explicit user approval."),
+    confirm: z
+      .boolean()
+      .describe(
+        "Must be true. Files a real, irreversible report against a real program. " +
+        "Set this ONLY when the user has approved this specific submission in their own words — " +
+        "never merely because the schema requires the field."
+      ),
   },
-  ({ id, confirm }) => h1.submitReportIntent(id, confirm)
+  ({ id, confirm }) => h1.submitReportIntent(id, confirm),
+  DESTRUCTIVE
 );
 
 tool("list_intent_attachments", "List files attached to a report intent.", { id: z.string() }, ({ id }) =>
@@ -292,14 +350,16 @@ tool(
     id: z.string().describe("Report intent id"),
     file_paths: z.array(z.string()).min(1).describe("Absolute paths of files to upload"),
   },
-  ({ id, file_paths }) => h1.uploadIntentAttachments(id, file_paths)
+  ({ id, file_paths }) => h1.uploadIntentAttachments(id, file_paths),
+  CREATES
 );
 
 tool(
   "delete_intent_attachment",
   "Remove one attachment from a report intent.",
   { id: z.string().describe("Report intent id"), attachment_id: z.string() },
-  ({ id, attachment_id }) => h1.deleteIntentAttachment(id, attachment_id)
+  ({ id, attachment_id }) => h1.deleteIntentAttachment(id, attachment_id),
+  DESTRUCTIVE
 );
 
 // ══ Direct writes ═════════════════════════════════════════════════
@@ -314,9 +374,24 @@ tool(
     vulnerability_information: z.string().describe("Full details in markdown"),
     impact: z.string().describe("What an attacker achieves (required by HackerOne)"),
     severity_rating: severity.optional(),
-    weakness_id: z.string().optional().describe("Weakness id from get_program_weaknesses"),
-    structured_scope_id: z.string().optional().describe("Asset id from get_program_scope"),
-    confirm: z.boolean().describe("Must be true. Only set after explicit user approval."),
+    weakness_id: z
+      .string()
+      .optional()
+      .describe(
+        "NUMERIC weakness id from get_program_weaknesses. Not the CWE external_id " +
+        "that get_report returns (e.g. 'cwe-200') — that is a different identifier and is rejected."
+      ),
+    structured_scope_id: z
+      .string()
+      .optional()
+      .describe("Numeric asset id from get_program_scope"),
+    confirm: z
+      .boolean()
+      .describe(
+        "Must be true. Files a real, irreversible report against a real program. " +
+        "Set this ONLY when the user has approved this specific submission in their own words — " +
+        "never merely because the schema requires the field."
+      ),
   },
   ({ confirm, ...opts }) => {
     if (!confirm) {
@@ -326,25 +401,8 @@ tool(
       );
     }
     return h1.submitReport(opts);
-  }
-);
-
-tool(
-  "add_comment",
-  "Add a comment to one of your reports — respond to triage questions or supply more information.",
-  {
-    report_id: z.string(),
-    message: z.string().describe("Comment text (markdown supported)"),
-    internal: z.boolean().optional().describe("Team-only comment (default false)"),
   },
-  ({ report_id, message, internal }) => h1.addComment(report_id, message, internal ?? false)
-);
-
-tool(
-  "close_report",
-  "Withdraw one of your own reports with an optional message.",
-  { report_id: z.string(), message: z.string().optional().describe("Reason for closing") },
-  ({ report_id, message }) => h1.closeReport(report_id, message)
+  DESTRUCTIVE
 );
 
 // ══ Account ═══════════════════════════════════════════════════════

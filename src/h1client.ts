@@ -65,6 +65,7 @@ export async function searchReports(opts: SearchReportsOpts = {}) {
     reports.sort((a: any, b: any) => {
       const va = a[field] ?? "";
       const vb = b[field] ?? "";
+      if (va === vb) return 0; // without this, equal values sorted as -1 and reversed the list
       return desc ? (vb > va ? 1 : -1) : va > vb ? 1 : -1;
     });
   }
@@ -118,18 +119,26 @@ export async function getReport(reportId: string) {
     disclosed_at: attrs.disclosed_at,
     severity: sev?.rating ?? null,
     cvss_score: sev?.score ?? null,
-    cvss_vector: sev?.attack_vector
-      ? {
-          attack_vector: sev.attack_vector,
-          attack_complexity: sev.attack_complexity,
-          privileges_required: sev.privileges_required,
-          user_interaction: sev.user_interaction,
-          scope: sev.scope,
-          confidentiality: sev.confidentiality,
-          integrity: sev.integrity,
-          availability: sev.availability,
-        }
-      : null,
+    // HackerOne now returns CVSS 4.0 (calculation_method "cvss_4_0"). The flat
+    // 3.1 fields this used to read are absent entirely, so the old gate on
+    // sev.attack_vector made cvss_vector null on every single report.
+    cvss_version: sev?.calculation_method ?? null,
+    cvss_vector_string: sev?.cvss_vector_string ?? null,
+    cvss_metrics:
+      sev?.cvss_4_point_0_metrics ??
+      (sev?.attack_vector
+        ? {
+            attack_vector: sev.attack_vector,
+            attack_complexity: sev.attack_complexity,
+            privileges_required: sev.privileges_required,
+            user_interaction: sev.user_interaction,
+            scope: sev.scope,
+            confidentiality: sev.confidentiality,
+            integrity: sev.integrity,
+            availability: sev.availability,
+          }
+        : null),
+    max_severity: sev?.max_severity ?? null,
     bounty_amount: bounty?.amount ?? null,
     bounty_bonus: bounty?.bonus_amount ?? null,
     vulnerability_information: attrs.vulnerability_information,
@@ -186,29 +195,42 @@ export async function listPrograms(pageSize = 50) {
   return pageSize && pageSize < programs.length ? programs.slice(0, pageSize) : programs;
 }
 
-export async function getProgramDetails(handle: string) {
+export async function getProgramDetails(handle: string, includePolicy = true) {
   const data = await h1Request(`/hackers/programs/${handle}`);
   // Some H1 endpoints return the resource directly; others wrap it in {data: {...}}
   const p = data.data ?? data;
   const attrs = p.attributes;
 
+  // These are the attributes the endpoint actually returns, verified live.
+  // The previous version read url, response_efficiency_percentage and three
+  // average_time_to_* fields that do not exist (every "response metric" its
+  // description advertised), and misspelled allows_bounty_splitting.
   return {
     id: p.id,
     handle: attrs.handle,
     name: attrs.name,
-    url: attrs.url,
-    offers_bounties: attrs.offers_bounties,
+    currency: attrs.currency,
     state: attrs.state,
     submission_state: attrs.submission_state,
+    triage_active: attrs.triage_active,
     started_accepting_at: attrs.started_accepting_at,
-    policy: attrs.policy,
-    response_efficiency_percentage: attrs.response_efficiency_percentage,
-    average_time_to_first_program_response:
-      attrs.average_time_to_first_program_response,
-    average_time_to_report_resolved: attrs.average_time_to_report_resolved,
-    average_time_to_bounty_awarded: attrs.average_time_to_bounty_awarded,
-    allow_bounty_splitting: attrs.allow_bounty_splitting,
+    offers_bounties: attrs.offers_bounties,
+    allows_bounty_splitting: attrs.allows_bounty_splitting,
+    open_scope: attrs.open_scope,
+    fast_payments: attrs.fast_payments,
+    gold_standard_safe_harbor: attrs.gold_standard_safe_harbor,
     bookmarked: attrs.bookmarked,
+    profile_picture: attrs.profile_picture,
+    // Per-user stats for the authenticated hacker.
+    number_of_reports_for_user: attrs.number_of_reports_for_user,
+    number_of_valid_reports_for_user: attrs.number_of_valid_reports_for_user,
+    bounty_earned_for_user: attrs.bounty_earned_for_user,
+    last_invitation_accepted_at_for_user: attrs.last_invitation_accepted_at_for_user,
+    url: `https://hackerone.com/${attrs.handle}`,
+    // The policy is usually the overwhelming majority of this payload.
+    ...(includePolicy
+      ? { policy: attrs.policy }
+      : { policy_omitted: true, policy_length: (attrs.policy ?? "").length }),
   };
 }
 
@@ -366,14 +388,11 @@ export async function getReportSummary(reportId: string) {
   const report = await getReport(reportId);
   const activities = await getReportActivities(reportId);
 
+  // Any activity carrying a human message is part of the conversation. The
+  // previous four-type whitelist silently dropped most of the thread — and
+  // returned nothing at all for reports closed with a single message.
   const comments = activities.filter(
-    (a: any) =>
-      a.message &&
-      !a.automated_response &&
-      (a.type === "activity-comment" ||
-        a.type === "activity-bug-triaged" ||
-        a.type === "activity-bug-resolved" ||
-        a.type === "activity-bounty-awarded")
+    (a: any) => a.message && !a.automated_response
   );
 
   return {
@@ -385,6 +404,24 @@ export async function getReportSummary(reportId: string) {
       date: c.created_at,
     })),
   };
+}
+
+function requireNumericId(
+  value: string | number | undefined,
+  field: string
+): number | undefined {
+  if (value == null || value === "") return undefined;
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    throw new Error(
+      `${field} must be the numeric id from ${
+        field === "weakness_id" ? "get_program_weaknesses" : "get_program_scope"
+      }, got '${value}'. ` +
+        `(get_report returns the CWE external_id such as 'cwe-200', which is a ` +
+        `different identifier and is not accepted here.)`
+    );
+  }
+  return n;
 }
 
 // ── Submit report ─────────────────────────────────────────────────
@@ -406,9 +443,18 @@ export async function submitReport(opts: {
     impact: opts.impact,
   };
   if (opts.severity_rating) attributes.severity_rating = opts.severity_rating;
-  if (opts.weakness_id != null) attributes.weakness_id = Number(opts.weakness_id);
-  if (opts.structured_scope_id != null) {
-    attributes.structured_scope_id = Number(opts.structured_scope_id);
+  // Number("cwe-200") is NaN and JSON.stringify turns NaN into null, which the
+  // API accepts — filing the report with no CWE and raising no error. Refuse
+  // instead. Note get_report returns the CWE external_id ("cwe-200"); the id
+  // this endpoint wants is the numeric one from get_program_weaknesses.
+  attributes.weakness_id = requireNumericId(opts.weakness_id, "weakness_id");
+  attributes.structured_scope_id = requireNumericId(
+    opts.structured_scope_id,
+    "structured_scope_id"
+  );
+  if (attributes.weakness_id === undefined) delete attributes.weakness_id;
+  if (attributes.structured_scope_id === undefined) {
+    delete attributes.structured_scope_id;
   }
 
   const result = await h1Request("/hackers/reports", {
@@ -425,39 +471,20 @@ export async function submitReport(opts: {
 }
 
 // ── Comments / close ──────────────────────────────────────────────
-export async function addComment(reportId: string, message: string, internal = false) {
-  const result = await h1Request(`/hackers/reports/${reportId}/activities`, {
-    method: "POST",
-    body: { data: { type: "activity-comment", attributes: { message, internal } } },
-  });
-  return {
-    id: result.data?.id,
-    type: result.data?.type,
-    message: result.data?.attributes?.message,
-    created_at: result.data?.attributes?.created_at,
-  };
-}
-
-export async function closeReport(reportId: string, message?: string) {
-  const result = await h1Request(`/hackers/reports/${reportId}/activities`, {
-    method: "POST",
-    body: {
-      data: {
-        type: "activity-hacker-requested-mediation",
-        attributes: {
-          message: message ?? "Withdrawing this report.",
-          close_report: true,
-        },
-      },
-    },
-  });
-  return {
-    id: result.data?.id,
-    type: result.data?.type,
-    message: result.data?.attributes?.message,
-    created_at: result.data?.attributes?.created_at,
-  };
-}
+// REMOVED: addComment() and closeReport().
+//
+// Both posted to POST /hackers/reports/{id}/activities. That route does not
+// exist in the Hacker API — it is absent from the documented endpoint list, and
+// probing it returns 401 for GET and for POST even with a deliberately invalid
+// body (a real endpoint would answer 400), while the same credentials get 200
+// on /hackers/reports/{id}. Because HackerOne answers 401 for unrouted paths,
+// the old tools failed while blaming the user's credentials.
+//
+// closeReport was worse than broken: it sent activity-hacker-requested-mediation,
+// which requests HackerOne mediation rather than withdrawing anything, under a
+// tool described to the agent as "Withdraw one of your own reports".
+//
+// The Hacker API exposes no way to comment on or close a report. Use the web UI.
 
 // ── Hacktivity (disclosed reports) ────────────────────────────────
 // Hacktivity ignores filter[...] params; it takes a Lucene `queryString`.
@@ -468,10 +495,16 @@ export interface DisclosedSearchOpts {
   substate?: string;
   reporter?: string;
   min_bounty?: number;
+  /** Default true. Undisclosed rows are all-null except the program handle. */
   disclosed_only?: boolean;
   sort?: string;
   page_size?: number;
+  page_number?: number;
 }
+
+// hacktivity silently caps page[size] at 50 regardless of what is requested,
+// and returns `links: {}` — so page[number] is the only way to paginate.
+const HACKTIVITY_MAX_PAGE_SIZE = 50;
 
 export function buildHacktivityQuery(opts: DisclosedSearchOpts): string {
   const terms: string[] = [];
@@ -480,42 +513,62 @@ export function buildHacktivityQuery(opts: DisclosedSearchOpts): string {
   if (opts.substate) terms.push(`substate:${quoteTerm(opts.substate)}`);
   if (opts.reporter) terms.push(`reporter:${quoteTerm(opts.reporter)}`);
   if (opts.min_bounty != null) terms.push(`total_awarded_amount:>${opts.min_bounty}`);
-  if (opts.disclosed_only) terms.push("disclosed:true");
+  if (opts.disclosed_only !== false) terms.push("disclosed:true");
   if (opts.query) terms.push(`(${opts.query})`);
   return terms.join(" AND ");
 }
 
+// Quote anything that is not a bare alphanumeric/underscore token. Hyphens
+// matter most: hacktivity tokenizes on them, so an unquoted `dept-of-defense`
+// matched `us-department-of-state` and returned another program's reports
+// under the requested program's name. Verified live.
 function quoteTerm(v: string): string {
-  return /[\s:()]/.test(v) ? `"${v.replace(/"/g, '\\"')}"` : v;
+  return /^[A-Za-z0-9_]+$/.test(v) ? v : `"${v.replace(/"/g, '\\"')}"`;
 }
 
 export async function searchDisclosedReports(opts: DisclosedSearchOpts) {
   const queryString = buildHacktivityQuery(opts);
+  const requested = opts.page_size ?? 25;
   const params: Record<string, string> = {
-    "page[size]": String(opts.page_size ?? 25),
+    "page[size]": String(Math.min(requested, HACKTIVITY_MAX_PAGE_SIZE)),
   };
+  if (opts.page_number) params["page[number]"] = String(opts.page_number);
   if (queryString) params.queryString = queryString;
   if (opts.sort) params.sort = opts.sort;
 
   const data = await h1Request("/hackers/hacktivity", { params, skipCache: true });
+  const rows = data.data ?? [];
+
   return {
     query: queryString || "(all)",
-    count: (data.data ?? []).length,
-    results: (data.data ?? []).map((r: any) => ({
-      id: r.id,
-      title: r.attributes?.title,
-      substate: r.attributes?.substate,
-      severity: r.attributes?.severity_rating,
-      cwe: r.attributes?.cwe,
-      cve_ids: r.attributes?.cve_ids,
-      disclosed_at: r.attributes?.disclosed_at,
-      submitted_at: r.attributes?.submitted_at,
-      total_awarded_amount: r.attributes?.total_awarded_amount,
-      votes: r.attributes?.votes,
-      url: r.attributes?.url ?? `https://hackerone.com/reports/${r.id}`,
-      reporter: r.relationships?.reporter?.data?.attributes?.username ?? null,
-      program: r.relationships?.program?.data?.attributes?.handle ?? null,
-    })),
+    page: opts.page_number ?? 1,
+    count: rows.length,
+    ...(requested > HACKTIVITY_MAX_PAGE_SIZE
+      ? { note: `page_size capped at ${HACKTIVITY_MAX_PAGE_SIZE} by HackerOne.` }
+      : {}),
+    results: rows.map((r: any) => {
+      const a = r.attributes ?? {};
+      // An undisclosed row carries no title, severity, CWE or bounty — only a
+      // program handle. Never mint a hackerone.com/reports/<id> link for one:
+      // the report is not public, so the URL reads as real prior art and is not.
+      const disclosed = a.disclosed === true || !!a.disclosed_at;
+      return {
+        id: r.id,
+        disclosed,
+        title: a.title ?? null,
+        substate: a.substate ?? null,
+        severity: a.severity_rating ?? null,
+        cwe: a.cwe ?? null,
+        cve_ids: a.cve_ids ?? null,
+        disclosed_at: a.disclosed_at ?? null,
+        submitted_at: a.submitted_at ?? null,
+        total_awarded_amount: a.total_awarded_amount ?? null,
+        votes: a.votes ?? null,
+        url: a.url ?? (disclosed ? `https://hackerone.com/reports/${r.id}` : null),
+        reporter: r.relationships?.reporter?.data?.attributes?.username ?? null,
+        program: r.relationships?.program?.data?.attributes?.handle ?? null,
+      };
+    }),
   };
 }
 
@@ -641,13 +694,37 @@ export async function validateReport(input: ReportDraftInput) {
   }
 
   if (program) {
-    const [scopes, weaknesses, exclusions] = await Promise.all([
-      getProgramScope(input.program_handle, 1000).catch(() => []),
-      getProgramWeaknesses(input.program_handle, 1000).catch(() => []),
-      getScopeExclusions(input.program_handle).catch(() => []),
+    // A failed lookup must never read as a verdict. Previously .catch(() => [])
+    // turned a network error into "this asset is not in scope" (a hard block on
+    // a valid report) and into "no reward exclusions" (a false all-clear).
+    const settle = async (label: string, fn: () => Promise<any[]>) => {
+      try {
+        return { ok: true as const, data: await fn(), label };
+      } catch (e: any) {
+        return { ok: false as const, data: [] as any[], label, error: e.message };
+      }
+    };
+    const [scopeRes, weaknessRes, exclusionRes] = await Promise.all([
+      settle("scope", () => getProgramScope(input.program_handle, 1000)),
+      settle("weaknesses", () => getProgramWeaknesses(input.program_handle, 1000)),
+      settle("scope exclusions", () => getScopeExclusions(input.program_handle)),
     ]);
+    for (const r of [scopeRes, weaknessRes, exclusionRes]) {
+      if (!r.ok) {
+        warn(`Could not fetch ${r.label} (${r.error}); checks against it were skipped, NOT passed.`);
+      }
+    }
+    const scopes = scopeRes.data;
+    const weaknesses = weaknessRes.data;
+    const exclusions = exclusionRes.data;
 
-    if (input.structured_scope_id != null) {
+    if (input.structured_scope_id != null && !scopeRes.ok) {
+      // Unknown, not invalid — do not block a valid report on our own failure.
+      warn(
+        `Could not verify structured_scope_id '${input.structured_scope_id}': the scope lookup failed.`,
+        "structured_scope_id"
+      );
+    } else if (input.structured_scope_id != null) {
       const asset = scopes.find(
         (s: any) => String(s.id) === String(input.structured_scope_id)
       );
@@ -687,7 +764,12 @@ export async function validateReport(input: ReportDraftInput) {
       );
     }
 
-    if (input.weakness_id != null) {
+    if (input.weakness_id != null && !weaknessRes.ok) {
+      warn(
+        `Could not verify weakness_id '${input.weakness_id}': the weakness lookup failed.`,
+        "weakness_id"
+      );
+    } else if (input.weakness_id != null) {
       const w = weaknesses.find((x: any) => String(x.id) === String(input.weakness_id));
       if (!w) {
         err(
@@ -819,11 +901,25 @@ export async function submitReportIntent(id: string, confirm: boolean) {
     method: "POST",
     body: {},
   });
+  // The submit endpoint returns the report-INTENT, not the report. The real
+  // report id is on the `report` relationship, which the docs say is "only
+  // present after submission". Using r.id here produced a valid-looking URL
+  // pointing at an unrelated third party's report.
   const r = result.data;
+  const reportId = r?.relationships?.report?.data?.id ?? null;
   return {
-    report_id: r?.id ?? null,
+    intent_id: r?.id ?? null,
+    report_id: reportId,
     state: r?.attributes?.state ?? null,
-    url: r?.id ? `https://hackerone.com/reports/${r.id}` : null,
+    url: reportId ? `https://hackerone.com/reports/${reportId}` : null,
+    ...(reportId
+      ? {}
+      : {
+          warning:
+            "HackerOne did not return a report id for this submission. The intent " +
+            "may still have been submitted — check list_report_intents and your " +
+            "reports on hackerone.com before resubmitting.",
+        }),
   };
 }
 
@@ -841,14 +937,49 @@ export async function listIntentAttachments(id: string) {
   }));
 }
 
+// This tool sends local files to a third party, so it refuses the paths an
+// agent is most likely to be talked into exfiltrating — including the very
+// file holding this server's own HackerOne token.
+const BLOCKED_ATTACHMENT_PATTERNS: RegExp[] = [
+  /(^|\/)\.claude\.json$/,
+  /(^|\/)\.claude\//,
+  /(^|\/)\.ssh\//,
+  /(^|\/)\.aws\//,
+  /(^|\/)\.gnupg\//,
+  /(^|\/)\.netrc$/,
+  /(^|\/)\.env(\.|$)/,
+  /(^|\/)id_(rsa|dsa|ecdsa|ed25519)$/,
+  /(^|\/)(shadow|passwd)$/,
+  /\.pem$/,
+  /\.p12$/,
+  /\.pfx$/,
+  /(^|\/)credentials$/,
+];
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
 export async function uploadIntentAttachments(id: string, filePaths: string[]) {
   const { readFile } = await import("fs/promises");
-  const { basename } = await import("path");
+  const { basename, resolve } = await import("path");
 
   const form = new FormData();
   for (const p of filePaths) {
-    const buf = await readFile(p);
-    form.append("files[]", new Blob([new Uint8Array(buf)]), basename(p));
+    const abs = resolve(p);
+    const blocked = BLOCKED_ATTACHMENT_PATTERNS.find((re) => re.test(abs));
+    if (blocked) {
+      throw new Error(
+        `Refusing to upload '${abs}': it matches a credential/secret path pattern. ` +
+          `This tool sends files to HackerOne. If the file is genuinely a proof of ` +
+          `concept, copy the relevant excerpt to a new file and upload that instead.`
+      );
+    }
+    const buf = await readFile(abs);
+    if (buf.byteLength > MAX_ATTACHMENT_BYTES) {
+      throw new Error(
+        `Refusing to upload '${abs}': ${(buf.byteLength / 1048576).toFixed(1)}MB ` +
+          `exceeds the ${MAX_ATTACHMENT_BYTES / 1048576}MB cap.`
+      );
+    }
+    form.append("files[]", new Blob([new Uint8Array(buf)]), basename(abs));
   }
 
   const result = await h1Request(`/hackers/report_intents/${id}/attachments`, {
